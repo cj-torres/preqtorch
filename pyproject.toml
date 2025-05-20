@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling", "torch>=1.0.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "preqtorch"
+version = "0.0.1"
+authors = [
+  { name="Charles Torres", email="torrescj92@gmail.com" },
+]
+description = "A package for prequential coding and clustering in PyTorch."
+readme = "README.md"
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "torch>=1.0.0",
+    "numpy>=1.19.0",
+    "tqdm>=4.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/torrescj/preqtorch"
+Issues = "https://github.com/torrescj/preqtorch/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/preqtorch"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src",
+    "README.md",
+    "LICENSE",
+]
