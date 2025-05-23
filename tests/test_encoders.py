@@ -5,7 +5,7 @@ import os
 from torch.utils.data import Dataset, DataLoader
 
 # Import directly from the package
-from preqtorch import BlockEncoder, MIRSEncoder
+from preqtorch import BlockEncoder, MIREncoder, ModelClass
 
 # Define a simple character-level model for the Spanish phonetic transcription task
 class SimplePhoneticModel(nn.Module):
@@ -230,12 +230,17 @@ def main():
 
     # Test BlockEncoder
     print("\nTesting BlockEncoder...")
+    model_class = ModelClass(
+        model=SimplePhoneticModel,
+        device='cpu',
+        kwargs={
+            'input_size': len(dataset.char_to_idx),
+            'hidden_size': 64,
+            'output_size': len(dataset.phoneme_to_idx)
+        }
+    )
     block_encoder = BlockEncoder(
-        model_class=lambda: SimplePhoneticModel(
-            input_size=len(dataset.char_to_idx),
-            hidden_size=64,
-            output_size=len(dataset.phoneme_to_idx)
-        ),
+        model_class=model_class,
         loss_fn=phonetic_loss_fn
     )
 
@@ -310,21 +315,26 @@ def main():
 
     print(f"Block Encoder (full dataset) - Code length: {code_length}.")
 
-    # Test MIRSEncoder
-    print("\nTesting MIRSEncoder...")
-    mirs_encoder = MIRSEncoder(
-        model_class=lambda: SimplePhoneticModel(
-            input_size=len(dataset.char_to_idx),
-            hidden_size=64,
-            output_size=len(dataset.phoneme_to_idx)
-        ),
+    # Test MIREncoder
+    print("\nTesting MIREncoder...")
+    model_class = ModelClass(
+        model=SimplePhoneticModel,
+        device='cpu',
+        kwargs={
+            'input_size': len(dataset.char_to_idx),
+            'hidden_size': 64,
+            'output_size': len(dataset.phoneme_to_idx)
+        }
+    )
+    mir_encoder = MIREncoder(
+        model_class=model_class,
         loss_fn=phonetic_loss_fn
     )
 
-    # Encode with MIRSEncoder
-    model, code_length, ema_params, beta, replay_streams = mirs_encoder.encode(
+    # Encode with MIREncoder
+    model, code_length, ema_params, beta, replay_streams = mir_encoder.encode(
         dataset=dataset,
-        set_name="Spanish Phonetic (MIRS)",
+        set_name="Spanish Phonetic (MIR)",
         n_replay_streams=2,
         learning_rate=0.001,
         batch_size=32,
@@ -336,23 +346,28 @@ def main():
         use_ema=True
     )
 
-    print(f"MIRS Encoder - Code length: {code_length}.")
+    print(f"MIR Encoder - Code length: {code_length}.")
 
-    # Test MIRSEncoder without beta and EMA
-    print("\nTesting MIRSEncoder without beta and EMA...")
-    mirs_encoder_no_beta_ema = MIRSEncoder(
-        model_class=lambda: SimplePhoneticModel(
-            input_size=len(dataset.char_to_idx),
-            hidden_size=64,
-            output_size=len(dataset.phoneme_to_idx)
-        ),
+    # Test MIREncoder without beta and EMA
+    print("\nTesting MIREncoder without beta and EMA...")
+    model_class = ModelClass(
+        model=SimplePhoneticModel,
+        device='cpu',
+        kwargs={
+            'input_size': len(dataset.char_to_idx),
+            'hidden_size': 64,
+            'output_size': len(dataset.phoneme_to_idx)
+        }
+    )
+    mir_encoder_no_beta_ema = MIREncoder(
+        model_class=model_class,
         loss_fn=phonetic_loss_fn
     )
 
-    # Encode with MIRSEncoder without beta and EMA
-    model, code_length, ema_params, beta, replay_streams = mirs_encoder_no_beta_ema.encode(
+    # Encode with MIREncoder without beta and EMA
+    model, code_length, ema_params, beta, replay_streams = mir_encoder_no_beta_ema.encode(
         dataset=dataset,
-        set_name="Spanish Phonetic (MIRS no beta/EMA)",
+        set_name="Spanish Phonetic (MIR no beta/EMA)",
         n_replay_streams=2,
         learning_rate=0.001,
         batch_size=32,
@@ -364,23 +379,28 @@ def main():
         use_ema=False
     )
 
-    print(f"MIRS Encoder (no beta/EMA) - Code length: {code_length}.")
+    print(f"MIR Encoder (no beta/EMA) - Code length: {code_length}.")
 
-    # Test MIRSEncoder with shuffle=False
-    print("\nTesting MIRSEncoder with shuffle=False...")
-    mirs_encoder_no_shuffle = MIRSEncoder(
-        model_class=lambda: SimplePhoneticModel(
-            input_size=len(dataset.char_to_idx),
-            hidden_size=64,
-            output_size=len(dataset.phoneme_to_idx)
-        ),
+    # Test MIREncoder with shuffle=False
+    print("\nTesting MIREncoder with shuffle=False...")
+    model_class = ModelClass(
+        model=SimplePhoneticModel,
+        device='cpu',
+        kwargs={
+            'input_size': len(dataset.char_to_idx),
+            'hidden_size': 64,
+            'output_size': len(dataset.phoneme_to_idx)
+        }
+    )
+    mir_encoder_no_shuffle = MIREncoder(
+        model_class=model_class,
         loss_fn=phonetic_loss_fn
     )
 
-    # Encode with MIRSEncoder with shuffle=False
-    model, code_length, ema_params, beta, replay_streams = mirs_encoder_no_shuffle.encode(
+    # Encode with MIREncoder with shuffle=False
+    model, code_length, ema_params, beta, replay_streams = mir_encoder_no_shuffle.encode(
         dataset=dataset,
-        set_name="Spanish Phonetic (MIRS, no shuffle)",
+        set_name="Spanish Phonetic (MIR, no shuffle)",
         n_replay_streams=2,
         learning_rate=0.001,
         batch_size=32,
@@ -393,23 +413,28 @@ def main():
         shuffle=False
     )
 
-    print(f"MIRS Encoder (no shuffle) - Code length: {code_length}.")
+    print(f"MIR Encoder (no shuffle) - Code length: {code_length}.")
 
-    # Test MIRSEncoder with return_code_length_history=True
-    print("\nTesting MIRSEncoder with return_code_length_history=True...")
-    mirs_encoder_with_history = MIRSEncoder(
-        model_class=lambda: SimplePhoneticModel(
-            input_size=len(dataset.char_to_idx),
-            hidden_size=64,
-            output_size=len(dataset.phoneme_to_idx)
-        ),
+    # Test MIREncoder with return_code_length_history=True
+    print("\nTesting MIREncoder with return_code_length_history=True...")
+    model_class = ModelClass(
+        model=SimplePhoneticModel,
+        device='cpu',
+        kwargs={
+            'input_size': len(dataset.char_to_idx),
+            'hidden_size': 64,
+            'output_size': len(dataset.phoneme_to_idx)
+        }
+    )
+    mir_encoder_with_history = MIREncoder(
+        model_class=model_class,
         loss_fn=phonetic_loss_fn
     )
 
-    # Encode with MIRSEncoder with return_code_length_history=True
-    model, code_length, code_length_history, ema_params, beta, replay_streams = mirs_encoder_with_history.encode(
+    # Encode with MIREncoder with return_code_length_history=True
+    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder_with_history.encode(
         dataset=dataset,
-        set_name="Spanish Phonetic (MIRS, with history)",
+        set_name="Spanish Phonetic (MIR, with history)",
         n_replay_streams=2,
         learning_rate=0.001,
         batch_size=32,
@@ -422,24 +447,29 @@ def main():
         return_code_length_history=True
     )
 
-    print(f"MIRS Encoder (with history) - Code length: {code_length}.")
-    print(f"MIRS Encoder - Code length history: {code_length_history}")
+    print(f"MIR Encoder (with history) - Code length: {code_length}.")
+    print(f"MIR Encoder - Code length history: {code_length_history}")
 
-    # Test MIRSEncoder with num_samples=None
-    print("\nTesting MIRSEncoder with num_samples=None...")
-    mirs_encoder_full_dataset = MIRSEncoder(
-        model_class=lambda: SimplePhoneticModel(
-            input_size=len(dataset.char_to_idx),
-            hidden_size=64,
-            output_size=len(dataset.phoneme_to_idx)
-        ),
+    # Test MIREncoder with num_samples=None
+    print("\nTesting MIREncoder with num_samples=None...")
+    model_class = ModelClass(
+        model=SimplePhoneticModel,
+        device='cpu',
+        kwargs={
+            'input_size': len(dataset.char_to_idx),
+            'hidden_size': 64,
+            'output_size': len(dataset.phoneme_to_idx)
+        }
+    )
+    mir_encoder_full_dataset = MIREncoder(
+        model_class=model_class,
         loss_fn=phonetic_loss_fn
     )
 
-    # Encode with MIRSEncoder with num_samples=None
-    model, code_length, ema_params, beta, replay_streams = mirs_encoder_full_dataset.encode(
+    # Encode with MIREncoder with num_samples=None
+    model, code_length, ema_params, beta, replay_streams = mir_encoder_full_dataset.encode(
         dataset=dataset,
-        set_name="Spanish Phonetic (MIRS, full dataset)",
+        set_name="Spanish Phonetic (MIR, full dataset)",
         n_replay_streams=2,
         learning_rate=0.001,
         batch_size=32,
@@ -452,7 +482,7 @@ def main():
         num_samples=None
     )
 
-    print(f"MIRS Encoder (full dataset) - Code length: {code_length}.")
+    print(f"MIR Encoder (full dataset) - Code length: {code_length}.")
 
 if __name__ == "__main__":
     main()

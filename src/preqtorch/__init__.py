@@ -1,23 +1,18 @@
 # Import main classes and functions
-from .core import PrequentialEncoder, ReplayStreams
-from .encoders import BlockEncoder, MIRSEncoder
-from .clustering import (
-    prequential_clustering, 
-    detect_codelength_boundaries,
-    consensus_prequential_clustering,
-    crp_clustering
-)
+from .utils import ModelClass
+from .replay import ReplayStreams, ReplayBuffer, Replay, ReplayingDataLoader
+from .encoders import BlockEncoder, MIREncoder, PrequentialEncoder
 
 __version__ = "0.0.1"
 
 __all__ = [
     'PrequentialEncoder',
     'BlockEncoder',
-    'MIRSEncoder',
+    'MIREncoder',
+    'ModelClass',
+    'Replay',
     'ReplayStreams',
-    'prequential_clustering',
-    'detect_codelength_boundaries',
-    'consensus_prequential_clustering',
-    'crp_clustering',
+    'ReplayBuffer',
+    'ReplayingDataLoader',
     '__version__'
 ]

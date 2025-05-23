@@ -4,7 +4,7 @@ import numpy as np
 from tqdm import tqdm
 from copy import deepcopy
 
-from .encoders import MIRSEncoder
+from preqtorch.encoders import MIREncoder
 
 # ------------------------------
 # Prequential Clustering

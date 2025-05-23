@@ -1,75 +1,89 @@
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset, Subset
 from copy import deepcopy
 import os, random
 
-class ReplayStreams:
-    def __init__(self, n_streams, reset_prob_fn=None):
+
+class ModelClass:
+    """
+    Creates a wrapper for torch.nn.Module to allow sampling new models.
+    This class provides functionality to initialize and manage PyTorch models
+    with consistent initialization strategies. It ensures models are properly
+    initialized with Xavier/Uniform weights and handles device placement.
+    """
+    def __init__(self, model: type, device: str, kwargs: dict = None):
         """
-        Manages replay streams for online learning.
+        Initialize the ModelClass wrapper.
 
         Args:
-            n_streams: Number of independent replay streams.
-            reset_prob_fn: Function f(t) giving probability of reset at iteration t (default = 1/(t+2))
+            model (type): A torch.nn.Module subclass (not instance) to be wrapped
+            device (str): The device to place models on ('cpu' or 'cuda')
+            kwargs (dict): Optional keyword arguments to pass to the model constructor
         """
-        self.dataset = []
-        self.n_streams = n_streams
-        self.stream_indices = [0 for _ in range(n_streams)]
-        self.reset_prob_fn = reset_prob_fn or (lambda t: 1 / (t + 2))
-        self.t = 0
+        assert issubclass(model, torch.nn.Module), "model must be a subclass of torch.nn.Module"
+        self.model = model
+        self.device = device
+        if kwargs:
+            self.kwargs = kwargs
+        else:
+            self.kwargs = {}
 
-    def update(self, batch):
-        self.dataset.append(batch)
-
-    def sample(self):
+    def __contains__(self, model_instance: torch.nn.Module):
         """
-        Returns n_streams batches for the given iteration t.
-        May reset stream index with probability defined by reset_prob_fn.
-
-        Returns:
-            List[Tuple[batch_idx, batch_data]]
-        """
-        sampled = []
-        for i in range(self.n_streams):
-            index = self.stream_indices[i]
-            batch = self.dataset[index]
-            sampled.append((index, batch))
-
-            if random.random() < self.reset_prob_fn(self.t):
-                self.stream_indices[i] = 0
-            else:
-                self.stream_indices[i] = min(self.stream_indices[i] + 1, len(self.dataset) - 1)
-
-        self.t += 1
-
-        return sampled
-
-
-class ReplayBuffer:
-    def __init__(self, n_samples):
-        """
-        Manages replay streams for online learning.
-
         Args:
-            n_streams: Number of independent replay streams.
-            reset_prob_fn: Function f(t) giving probability of reset at iteration t (default = 1/(t+2))
-        """
-        self.dataset = []
-        self.n_samples = n_samples
-
-    def update(self, batch):
-        self.dataset.append(batch)
-
-    def sample(self):
-        """
-        Returns n_streams batches for the given iteration t.
-        May reset stream index with probability defined by reset_prob_fn.
+            model_instance: an example model
 
         Returns:
-            List[Tuple[batch_idx, batch_data]]
+            Whether the model is a member of the Model Class
         """
+        return isinstance(model_instance, self.model)
 
-        return random.choices(self.dataset, k=self.n_samples)
+    def initialize(self):
+        """
+        Creates and initializes a new instance of the model.
+    
+        Returns:
+            torch.nn.Module: A newly initialized model instance on the specified device
+        """
+        new_model = self.model(**self.kwargs)
+        new_model.to(self.device)
+        return self._initialize_model(new_model)
+
+    def to(self, device):
+        """
+        Updates the target device for future model instantiations.
+    
+        Args:
+            device (str): The new target device ('cpu' or 'cuda')
+        """
+        self.device = device
+
+    @staticmethod
+    def _initialize_model(model):
+        """
+        Initializes model parameters using a specific strategy:
+        - Xavier uniform initialization for weight matrices
+        - Zero initialization for bias vectors
+        - Uniform [-1, 1] initialization for other parameters
+    
+        Args:
+            model (torch.nn.Module): The model to initialize
+    
+        Returns:
+            torch.nn.Module: The initialized model
+        """
+        # Apply xavier uniform initialization to all parameters
+        for param in model.parameters():
+            if param.dim() > 1:  # Only apply to weight matrices, not bias vectors
+                torch.nn.init.xavier_uniform_(param)
+            elif 'bias' in str(param):  # bias vectors init zero
+                torch.nn.init.zeros_(param)
+            else:  # else uniform initialization, even on [-1, 1]
+                torch.nn.init.uniform_(param, a=-1.0, b=1.0)
+        return model
+
+
+
 
 

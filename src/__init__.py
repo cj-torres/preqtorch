@@ -1,22 +1,18 @@
 # Import from the preqtorch package
-from .preqtorch.core import PrequentialEncoder, ReplayStreams
-from .preqtorch.encoders import BlockEncoder, MIRSEncoder
-from .preqtorch.clustering import (
-    prequential_clustering,
-    detect_codelength_boundaries,
-    consensus_prequential_clustering,
-    crp_clustering
-)
+from .preqtorch.utils import ModelClass
+from .preqtorch.replay import ReplayStreams, ReplayBuffer, Replay, ReplayingDataLoader
+from .preqtorch.encoders import BlockEncoder, MIREncoder, PrequentialEncoder
+
 from .preqtorch.__init__ import __version__
 
 __all__ = [
     'PrequentialEncoder',
     'BlockEncoder',
-    'MIRSEncoder',
+    'MIREncoder',
+    'ModelClass',
+    'Replay',
     'ReplayStreams',
-    'prequential_clustering',
-    'detect_codelength_boundaries',
-    'consensus_prequential_clustering',
-    'crp_clustering',
+    'ReplayBuffer',
+    'ReplayingDataLoader',
     '__version__'
 ]
