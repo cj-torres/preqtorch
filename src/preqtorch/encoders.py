@@ -7,6 +7,27 @@ from .utils import ModelClass
 from .replay import ReplayStreams, ReplayBuffer, Replay, ReplayingDataLoader
 
 
+class EncoderState:
+    """
+    Holds the state of the encoding process. Allows for pausing/resuming training.
+    """
+    def __init__(self, model, optim, beta, beta_optim, ema_params, trained_params):
+        self.model = model
+        self.optim = optim
+        self.beta = beta
+        self.beta_optim = beta_optim
+        self.ema_params = ema_params
+        self.trained_params = trained_params
+        self.code_length = 0
+        self.history = []
+
+    def __repr__(self):
+        return f"EncoderState(\ncode_length={self.code_length},\nhistory={self.history}\n)"
+
+    def __str__(self):
+        return self.__repr__()
+
+
 class PrequentialEncoder:
     """
     Base class for prequential encoding methods.
@@ -143,6 +164,11 @@ class PrequentialEncoder:
         """
         Encode the data using the prequential coding method.
 
+        This is a one-shot method that performs the following steps:
+        1. Initialize the encoder with a dataset
+        2. Step through batches
+        3. Finalize to get the model and code length
+
         This method should be implemented by subclasses.
         """
         raise NotImplementedError("Subclasses must implement the encode method.")
@@ -154,6 +180,71 @@ class BlockEncoder(PrequentialEncoder):
     """
     def __init__(self, model_class: ModelClass, loss_fn=None, device=None, optimizer_fn=None):
         super().__init__(model_class, loss_fn, device, optimizer_fn)
+
+    def encode(self, dataset, set_name, stop_points, batch_size, seed, 
+               learning_rate=1e-4, epochs=50, patience=20, shuffle=True, 
+               collate_fn=None, use_device_handling=True, num_samples=None):
+        """
+        One-shot method to encode the data using the block-wise prequential coding method.
+
+        This method performs the following steps:
+        1. Initialize the encoder with a dataset
+        2. Step through batches
+        3. Return the model and code length
+
+        Args:
+            dataset: The dataset to encode
+            set_name: Name of the dataset (for logging)
+            stop_points: List of points where to stop and evaluate
+            batch_size: Batch size for training
+            seed: Random seed for reproducibility
+            learning_rate: Learning rate for the optimizer
+            epochs: Maximum number of epochs to train
+            patience: Number of epochs to wait for improvement before early stopping
+            shuffle: Whether to shuffle the data
+            collate_fn: Function to collate samples into batches
+            return_code_length_history: Whether to return the code length history
+            use_device_handling: Whether to handle device placement in the model
+            num_samples: Number of samples to use (if None, use all)
+
+        Returns:
+            If return_code_length_history is False:
+                model: The trained model
+                code_length: The code length of the encoded data
+            If return_code_length_history is True:
+                model: The trained model
+                code_length: The code length of the encoded data
+                code_length_history: The history of code lengths during training
+        """
+        # If num_samples is provided, create a subset of the dataset
+        if num_samples is not None and num_samples < len(dataset):
+            indices = torch.randperm(len(dataset))[:num_samples]
+            dataset = torch.utils.data.Subset(dataset, indices)
+
+        # Initialize the encoder
+        state, train_chunks, eval_chunks, batch_size, shuffle, collate_fn = self.initialize(
+            dataset, stop_points, batch_size, learning_rate, seed, shuffle, collate_fn)
+
+        encoding_fn = self.encoding_fn or self._get_default_encoding_fn()
+
+        initial_weights = deepcopy(state.model.state_dict())
+
+        for train_set, eval_set in zip(train_chunks, eval_chunks):
+            train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
+            eval_loader = DataLoader(eval_set, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+
+            # Evaluate code length before training
+            self.eval_code_length(state, eval_loader, encoding_fn)
+
+            if train_set == train_chunks[-1]:
+                break
+
+            state.model.load_state_dict(deepcopy(initial_weights))
+            self.train_until_patience(state, train_loader, encoding_fn, patience, epochs)
+
+        print(f"Performance for {set_name}: Prequential code length: {state.code_length}")
+
+        return state.model, state.code_length, state.history
 
     def calculate_code_length(self, model, batch, encoding_fn=None):
         encoding_fn = encoding_fn or self.encoding_fn or self._get_default_encoding_fn()
@@ -238,55 +329,79 @@ class BlockEncoder(PrequentialEncoder):
                 if no_improvement > patience:
                     return
 
-    def fit(self, dataset, set_name, stop_points, batch_size, seed,
-            learning_rate=1e-4, epochs=50, patience=20,
-            shuffle=True, collate_fn=None, return_code_length_history=False):
-
-        state, train_chunks, eval_chunks, batch_size, shuffle, collate_fn = self.initialize(
-            dataset, stop_points, batch_size, learning_rate, seed, shuffle, collate_fn)
-
-        encoding_fn = self.encoding_fn or self._get_default_encoding_fn()
-
-        initial_weights = deepcopy(state.model.state_dict())
-
-        for train_set, eval_set in zip(train_chunks, eval_chunks):
-            train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
-            eval_loader = DataLoader(eval_set, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
-
-            # Evaluate code length before training
-            self.eval_code_length(state, eval_loader, encoding_fn)
-
-            if train_set == train_chunks[-1]:
-                break
-
-            state.model.load_state_dict(deepcopy(initial_weights))
-            self.train_until_patience(state, train_loader, encoding_fn, patience, epochs)
-
-        print(f"Performance for {set_name}: Prequential code length: {state.code_length}")
-
-        if return_code_length_history:
-            return state.model, state.code_length, state.history
-        return state.model, state.code_length
-
-
-class EncoderState:
-    """
-    Holds the state of the encoding process. Allows for pausing/resuming training.
-    """
-    def __init__(self, model, optim, beta, beta_optim, ema_params, trained_params):
-        self.model = model
-        self.optim = optim
-        self.beta = beta
-        self.beta_optim = beta_optim
-        self.ema_params = ema_params
-        self.trained_params = trained_params
-        self.code_length = 0
-        self.history = []
 
 
 class MIREncoder(PrequentialEncoder):
     def __init__(self, model_class, loss_fn=None, device=None, optimizer_fn=None):
         super().__init__(model_class, loss_fn, device, optimizer_fn)
+
+    def encode(self, dataset, set_name, n_replay_streams, learning_rate=1e-4, batch_size=32, 
+               seed=42, alpha=0.1, collate_fn=None, use_device_handling=True, use_beta=True, 
+               use_ema=True, shuffle=True, num_samples=None, replay_type="buffer"):
+        """
+        One-shot method to encode the data using the MIR prequential coding method.
+
+        This method performs the following steps:
+        1. Initialize the encoder with a dataset
+        2. Step through batches
+        3. Finalize to get the model and code length
+
+        Args:
+            dataset: The dataset to encode
+            set_name: Name of the dataset (for logging)
+            n_replay_streams: Number of replay streams or buffer size
+            learning_rate: Learning rate for the optimizer
+            batch_size: Batch size for training
+            seed: Random seed for reproducibility
+            alpha: EMA update rate
+            collate_fn: Function to collate samples into batches
+            use_device_handling: Whether to handle device placement in the model
+            use_beta: Whether to use learnable temperature parameter
+            use_ema: Whether to use exponential moving average
+            shuffle: Whether to shuffle the data
+            num_samples: Number of samples to use (if None, use all)
+            replay_type: Type of replay to use ("buffer" or "streams")
+
+        Returns:
+            If return_code_length_history is False:
+                model: The trained model
+                code_length: The code length of the encoded data
+                ema_params: The EMA parameters
+                beta: The learnable temperature parameter
+                replay_streams: The replay streams
+            If return_code_length_history is True:
+                model: The trained model
+                code_length: The code length of the encoded data
+                code_length_history: The history of code lengths during training
+                ema_params: The EMA parameters
+                beta: The learnable temperature parameter
+                replay_streams: The replay streams
+        """
+        # If num_samples is provided, create a subset of the dataset
+        if num_samples is not None and num_samples < len(dataset):
+            indices = torch.randperm(len(dataset))[:num_samples]
+            dataset = torch.utils.data.Subset(dataset, indices)
+
+        # Initialize the encoder
+        state, replay_loader = self.initialize(
+            dataset, batch_size, seed, n_replay_streams, replay_type,
+            None, learning_rate, alpha, collate_fn, shuffle)
+
+        # If not using beta or EMA, set them to None
+        if not use_beta:
+            state.beta = None
+            state.beta_optim = None
+
+        if not use_ema:
+            state.ema_params = None
+
+        # Process each batch
+        for batch in replay_loader:
+            self.step(batch, replay_loader, state, alpha)
+
+        # Finalize and get results
+        model, code_length, history, ema_params, beta = self.finalize(state)
+        return model, code_length, history, ema_params, beta, replay_loader.replay
 
     def initialize(self, dataset, batch_size, seed, n_replay_streams, replay_type="buffer",
                    model=None, learning_rate=1e-4, alpha=0.1, collate_fn=None, shuffle=True):
@@ -342,9 +457,10 @@ class MIREncoder(PrequentialEncoder):
         state.optim.step()
 
         # Update EMA
-        with torch.no_grad():
-            for name, param in model.named_parameters():
-                state.ema_params[name] = state.ema_params[name] * (1 - alpha) + param * alpha
+        if state.ema_params is not None:
+            with torch.no_grad():
+                for name, param in model.named_parameters():
+                    state.ema_params[name] = state.ema_params[name] * (1 - alpha) + param * alpha
 
         # Replay training
         for _, replay_batch in replay_loader.sample_replay():
@@ -353,9 +469,10 @@ class MIREncoder(PrequentialEncoder):
             loss = code_lengths.sum()
             loss.backward()
             state.optim.step()
-            with torch.no_grad():
-                for name, param in model.named_parameters():
-                    state.ema_params[name] = state.ema_params[name] * (1 - alpha) + param * alpha
+            if state.ema_params is not None:
+                with torch.no_grad():
+                    for name, param in model.named_parameters():
+                        state.ema_params[name] = state.ema_params[name] * (1 - alpha) + param * alpha
 
     def calculate_code_length(self, model, batch, beta=None, ema_params=None, encoding_fn=None):
         """

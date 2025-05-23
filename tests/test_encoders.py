@@ -108,6 +108,7 @@ class SpanishPhoneticDataset(Dataset):
 # Collate function to handle variable length sequences
 def collate_fn(batch):
     # Sort the batch by word length (descending)
+    batch = list(batch)
     batch.sort(key=lambda x: len(x[0]), reverse=True)
 
     # Get the data
@@ -244,7 +245,34 @@ def main():
         loss_fn=phonetic_loss_fn
     )
 
-    # Encode with BlockEncoder (default parameters)
+    # Test staged approach (initialize, step, finalize)
+    print("\nTesting BlockEncoder with staged approach (initialize, step, finalize)...")
+    # Initialize
+    state, train_chunks, eval_chunks, batch_size, shuffle, collate_fn_result = block_encoder.initialize(
+        dataset=dataset,
+        stop_points=[0.5, 1.0],
+        batch_size=32,
+        learning_rate=0.001,
+        seed=42,
+        shuffle=True,
+        collate_fn=collate_fn
+    )
+
+    # Create dataloader for the first chunk
+    train_loader = DataLoader(train_chunks[0], batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
+
+    # Step through batches
+    for batch in train_loader:
+        block_encoder.step(state, batch)
+
+    # Evaluate on the first chunk
+    eval_loader = DataLoader(eval_chunks[0], batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+    block_encoder.eval_code_length(state, eval_loader)
+
+    print(f"Block Encoder (staged approach) - Code length: {state.code_length}.")
+
+    # Encode with BlockEncoder (one-shot approach, default parameters)
+    print("\nTesting BlockEncoder with one-shot approach...")
     model, code_length = block_encoder.encode(
         dataset=dataset,
         set_name="Spanish Phonetic (Block)",
@@ -258,7 +286,7 @@ def main():
         use_device_handling=False
     )
 
-    print(f"Block Encoder - Code length: {code_length}.")
+    print(f"Block Encoder (one-shot approach) - Code length: {code_length}.")
 
     # Test BlockEncoder with shuffle=False
     print("\nTesting BlockEncoder with shuffle=False...")
@@ -331,7 +359,33 @@ def main():
         loss_fn=phonetic_loss_fn
     )
 
-    # Encode with MIREncoder
+    # Test staged approach (initialize, step, finalize)
+    print("\nTesting MIREncoder with staged approach (initialize, step, finalize)...")
+    # Initialize
+    state, replay_loader = mir_encoder.initialize(
+        dataset=dataset,
+        batch_size=32,
+        seed=42,
+        n_replay_streams=2,
+        replay_type="buffer",
+        model=None,
+        learning_rate=0.001,
+        alpha=0.1,
+        collate_fn=collate_fn,
+        shuffle=True
+    )
+
+    # Step through batches
+    for batch in replay_loader:
+        mir_encoder.step(batch, replay_loader, state, alpha=0.1)
+
+    # Finalize
+    model, code_length, history, ema_params, beta = mir_encoder.finalize(state)
+
+    print(f"MIR Encoder (staged approach) - Code length: {code_length}.")
+
+    # Encode with MIREncoder (one-shot approach)
+    print("\nTesting MIREncoder with one-shot approach...")
     model, code_length, ema_params, beta, replay_streams = mir_encoder.encode(
         dataset=dataset,
         set_name="Spanish Phonetic (MIR)",
@@ -346,7 +400,7 @@ def main():
         use_ema=True
     )
 
-    print(f"MIR Encoder - Code length: {code_length}.")
+    print(f"MIR Encoder (one-shot approach) - Code length: {code_length}.")
 
     # Test MIREncoder without beta and EMA
     print("\nTesting MIREncoder without beta and EMA...")
