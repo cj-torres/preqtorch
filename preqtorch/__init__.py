@@ -1,12 +1,13 @@
-# Import main classes and functions
+# Import from the preqtorch package
 from .utils import ModelClass
 from .replay import ReplayStreams, ReplayBuffer, Replay, ReplayingDataLoader
 from .encoders import BlockEncoder, MIREncoder, PrequentialEncoder
 
-__version__ = "0.0.1"
+# from .preqtorch.__init__ import __version__
 
 __all__ = [
     'PrequentialEncoder',
+    'EncoderState',
     'BlockEncoder',
     'MIREncoder',
     'ModelClass',

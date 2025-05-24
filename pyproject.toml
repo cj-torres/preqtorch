@@ -31,7 +31,7 @@ packages = ["src/preqtorch"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "src",
+    "preqtorch",
     "README.md",
     "LICENSE",
 ]

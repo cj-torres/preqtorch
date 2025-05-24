@@ -124,10 +124,20 @@ class PrequentialEncoder:
         """
         Returns the default encoding function if none is provided.
         The encoding function returns per-sample code lengths.
+
+        The encoding function applies masks to outputs and targets before computing the loss.
         """
-        def encoding_fn(outputs, targets, mask):
+        def encoding_fn(outputs, targets, target_mask, output_mask=None):
             try:
-                return torch.nn.functional.cross_entropy(outputs[mask], targets[mask], reduction='none')
+                # Apply masks to outputs and targets
+                if output_mask is not None:
+                    masked_outputs = outputs[output_mask]
+                else:
+                    masked_outputs = outputs
+
+                masked_targets = targets[target_mask]
+
+                return torch.nn.functional.cross_entropy(masked_outputs, masked_targets, reduction='none')
             except RuntimeError as e:
                 if "Expected all tensors to be on the same device" in str(e):
                     raise RuntimeError(
@@ -251,11 +261,32 @@ class BlockEncoder(PrequentialEncoder):
         inputs, target = batch[:2]
         inputs = self._move_to_device(inputs)
         target = self._move_to_device(target)
-        target_mask = self._move_to_device(batch[2]) if len(batch) > 2 and batch[2] is not None \
-            else torch.ones_like(target, dtype=torch.bool, device=self.device)
+
+        # Handle different batch formats:
+        # 1. input, target
+        # 2. input, target, mask (shared mask for both input and target)
+        # 3. input, target, output_mask, target_mask (separate masks for outputs and targets)
+
+        if len(batch) <= 2 or batch[2] is None:
+            # Case 1: No masks provided, create default masks
+            output_mask = torch.ones_like(inputs, dtype=torch.bool, device=self.device)
+            target_mask = torch.ones_like(target, dtype=torch.bool, device=self.device)
+        elif len(batch) == 3:
+            # Case 2: One mask provided, use it for both output and target
+            shared_mask = self._move_to_device(batch[2])
+            output_mask = shared_mask
+            target_mask = shared_mask
+        else:
+            # Case 3: Two masks provided, use them separately
+            output_mask = self._move_to_device(batch[2]) if batch[2] is not None else torch.ones_like(inputs, dtype=torch.bool, device=self.device)
+            target_mask = self._move_to_device(batch[3]) if batch[3] is not None else torch.ones_like(target, dtype=torch.bool, device=self.device)
+
+        # Generate model outputs
         outputs = model(inputs)
-        code_lengths = encoding_fn(outputs, target, target_mask)
-        return code_lengths, inputs, target, target_mask
+
+        # Apply masks to outputs and targets before passing to encoding_fn
+        code_lengths = encoding_fn(outputs, target, target_mask, output_mask)
+        return code_lengths, inputs, target, target_mask, output_mask
 
     def initialize(self, dataset, stop_points, batch_size, learning_rate, seed,
                    shuffle=True, collate_fn=None):
@@ -286,7 +317,7 @@ class BlockEncoder(PrequentialEncoder):
         optim = state.optim
 
         optim.zero_grad()
-        code_lengths, inputs, target, target_mask = self.calculate_code_length(model, batch, encoding_fn)
+        code_lengths, inputs, target, target_mask, output_mask = self.calculate_code_length(model, batch, encoding_fn)
         loss = code_lengths.sum()
         loss.backward()
         optim.step()
@@ -300,7 +331,7 @@ class BlockEncoder(PrequentialEncoder):
         model.eval()
 
         for batch in dataloader:
-            code_lengths, inputs, target, target_mask = self.calculate_code_length(model, batch, encoding_fn)
+            code_lengths, inputs, target, target_mask, output_mask = self.calculate_code_length(model, batch, encoding_fn)
             state.code_length += code_lengths.sum().item()
             state.history.append(code_lengths.sum().item())
 
@@ -315,7 +346,7 @@ class BlockEncoder(PrequentialEncoder):
             for batch in train_dataloader:
                 encoding_fn = encoding_fn or self._get_default_encoding_fn()
                 optim.zero_grad()
-                code_lengths, inputs, target, target_mask = self.calculate_code_length(model, batch, encoding_fn)
+                code_lengths, inputs, target, target_mask, output_mask = self.calculate_code_length(model, batch, encoding_fn)
                 loss = code_lengths.sum()
                 loss.backward()
                 optim.step()
@@ -446,7 +477,7 @@ class MIREncoder(PrequentialEncoder):
             state.beta_optim.zero_grad()
 
         # New batch forward pass
-        code_lengths, inputs, target, target_mask = self.calculate_code_length(
+        code_lengths, inputs, target, target_mask, output_mask = self.calculate_code_length(
             model, batch, beta, state.ema_params, encoding_fn)
         loss = code_lengths.sum()
         state.code_length += loss.detach()
@@ -465,7 +496,7 @@ class MIREncoder(PrequentialEncoder):
         # Replay training
         for _, replay_batch in replay_loader.sample_replay():
             state.optim.zero_grad()
-            code_lengths, _, _, _ = self.calculate_code_length(model, replay_batch, None, None, encoding_fn)
+            code_lengths, _, _, _, _ = self.calculate_code_length(model, replay_batch, None, None, encoding_fn)
             loss = code_lengths.sum()
             loss.backward()
             state.optim.step()
@@ -480,13 +511,17 @@ class MIREncoder(PrequentialEncoder):
 
         Args:
             model: PyTorch model.
-            batch: Tuple containing inputs, targets, and optionally a mask.
+            batch: Tuple containing inputs, targets, and optionally masks.
+                  The batch can be in one of three formats:
+                  1. (inputs, targets)
+                  2. (inputs, targets, mask) - shared mask for both inputs and targets
+                  3. (inputs, targets, output_mask, target_mask) - separate masks for outputs and targets
             beta: Optional learnable temperature scalar.
             ema_params: Optional EMA model parameters.
             encoding_fn: Optional override of the default encoding function.
 
         Returns:
-            Tuple: (code_lengths, inputs, targets, target_mask)
+            Tuple: (code_lengths, inputs, targets, target_mask, output_mask)
         """
         encoding_fn = encoding_fn or self.encoding_fn or self._get_default_encoding_fn()
 
@@ -502,15 +537,33 @@ class MIREncoder(PrequentialEncoder):
         inputs = self._move_to_device(inputs)
         target = self._move_to_device(target)
 
-        target_mask = self._move_to_device(batch[2]) if len(batch) > 2 and batch[2] is not None \
-            else torch.ones_like(target, dtype=torch.bool, device=self.device)
+        # Handle different batch formats:
+        # 1. input, target
+        # 2. input, target, mask (shared mask for both input and target)
+        # 3. input, target, output_mask, target_mask (separate masks for outputs and targets)
+
+        if len(batch) <= 2 or batch[2] is None:
+            # Case 1: No masks provided, create default masks
+            output_mask = torch.ones_like(inputs, dtype=torch.bool, device=self.device)
+            target_mask = torch.ones_like(target, dtype=torch.bool, device=self.device)
+        elif len(batch) == 3:
+            # Case 2: One mask provided, use it for both output and target
+            shared_mask = self._move_to_device(batch[2])
+            output_mask = shared_mask
+            target_mask = shared_mask
+        else:
+            # Case 3: Two masks provided, use them separately
+            output_mask = self._move_to_device(batch[2]) if batch[2] is not None else torch.ones_like(inputs, dtype=torch.bool, device=self.device)
+            target_mask = self._move_to_device(batch[3]) if batch[3] is not None else torch.ones_like(target, dtype=torch.bool, device=self.device)
 
         try:
+            # Generate model outputs
             outputs = model(inputs)
             if beta is not None:
                 outputs = outputs * F.softplus(beta)
 
-            code_lengths = encoding_fn(outputs, target, target_mask)
+            # Apply masks to outputs and targets before passing to encoding_fn
+            code_lengths = encoding_fn(outputs, target, target_mask, output_mask)
 
             # Restore original weights if EMA was used
             if ema_params is not None:
@@ -521,8 +574,9 @@ class MIREncoder(PrequentialEncoder):
             inputs = self._move_to_cpu(inputs)
             target = self._move_to_cpu(target)
             target_mask = self._move_to_cpu(target_mask)
+            output_mask = self._move_to_cpu(output_mask)
 
-            return code_lengths, inputs, target, target_mask
+            return code_lengths, inputs, target, target_mask, output_mask
 
         except Exception as e:
             # Restore original weights in case of failure
