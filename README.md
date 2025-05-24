@@ -4,12 +4,10 @@ A PyTorch-based library for prequentially encoding datasets and clustering.
 
 ## Overview
 
-PreqTorch provides tools for prequential encoding and clustering in PyTorch. Prequential encoding is a technique for evaluating predictive models in an online learning setting, where the model is updated after each prediction.
+PreqTorch provides tools for prequential encoding in PyTorch. Prequential encoding is a technique for evaluating datasets in an online learning setting, where the model is updated after each prediction.
 
 The library includes:
 - Prequential encoders (BlockEncoder, MIREncoder)
-- Clustering algorithms based on prequential coding
-- Tools for change point detection
 
 ## Installation
 
@@ -148,7 +146,7 @@ model, code_length, history = encoder.encode(
 
 ### MIR Encoding
 
-MIR (Memory-based Incremental Replay) encoding uses replay buffers or streams to revisit previous data.
+MIR (Mini-batch Incremental/Replay) encoding uses replay buffers or streams to revisit previous data.
 
 ```python
 from preqtorch import MIREncoder
@@ -174,38 +172,6 @@ model, code_length, history, ema_params, beta, replay = encoder.encode(
     replay_type="buffer"  # Type of replay: "buffer" or "streams"
 )
 ```
-
-### Prequential Clustering
-
-```python
-from preqtorch import MIREncoder, prequential_clustering
-
-# Create an encoder
-encoder = MIREncoder(
-    model_class=MyModel,
-    loss_fn=torch.nn.functional.cross_entropy
-)
-
-# Perform prequential clustering
-best_seq, best_code_lengths, clusters = prequential_clustering(
-    encoder=encoder,
-    dataset=my_dataset,
-    beam_width=3,
-    learning_rate=0.001,
-    seed=42,
-    alpha=0.1,
-    batch_size=32,
-    n_replay_streams=2,
-    collate_fn=my_collate_fn  # Your custom collate function
-)
-```
-
-## Examples
-
-See the `tests` directory for examples of how to use the library. In particular:
-- `test_encoders.py` shows how to create and use encoders
-- `test_clustering.py` demonstrates prequential clustering
-- `test_consensus_clustering.py` shows how to perform consensus clustering
 
 ## License
 

@@ -93,11 +93,11 @@ class BaseSpanishPhoneticDataset(Dataset):
         word, phonemes = self.data[idx]
 
         # Convert word to tensor of indices
-        word_indices = [self.char_to_idx.get(char, 0) for char in word]
+        word_indices = [1]+[self.char_to_idx.get(char, 0) for char in word]
         word_tensor = torch.tensor(word_indices, dtype=torch.long)
 
         # Convert phonemes to tensor of indices
-        phoneme_indices = [self.phoneme_to_idx.get(phoneme, 0) for phoneme in phonemes]
+        phoneme_indices = [self.phoneme_to_idx.get(phoneme, 0) for phoneme in phonemes]+[1]
         phoneme_tensor = torch.tensor(phoneme_indices, dtype=torch.long)
 
         return word_tensor, phoneme_tensor
@@ -121,9 +121,9 @@ class SpanishPhoneticDatasetFormat3(BaseSpanishPhoneticDataset):
     def __getitem__(self, idx):
         word_tensor, phoneme_tensor = self._get_tensors(idx)
         # Create masks for both input and target (all True in this case)
-        input_mask = torch.ones_like(word_tensor, dtype=torch.bool)
+        output_mask = torch.ones_like(phoneme_tensor, dtype=torch.bool)
         target_mask = torch.ones_like(phoneme_tensor, dtype=torch.bool)
-        return word_tensor, phoneme_tensor, input_mask, target_mask
+        return word_tensor, phoneme_tensor, output_mask, target_mask
 
 # For backward compatibility
 SpanishPhoneticDataset = SpanishPhoneticDatasetFormat2
@@ -141,6 +141,19 @@ def collate_fn_format1(batch):
     words_padded = nn.utils.rnn.pad_sequence(words, batch_first=True)
     phonemes_padded = nn.utils.rnn.pad_sequence(phonemes, batch_first=True)
 
+    # Ensure both tensors have the same size
+    max_len = max(words_padded.size(1), phonemes_padded.size(1))
+
+    # Pad words if needed
+    if words_padded.size(1) < max_len:
+        padding = torch.zeros(words_padded.size(0), max_len - words_padded.size(1), dtype=words_padded.dtype, device=words_padded.device)
+        words_padded = torch.cat([words_padded, padding], dim=1)
+
+    # Pad phonemes if needed
+    if phonemes_padded.size(1) < max_len:
+        padding = torch.zeros(phonemes_padded.size(0), max_len - phonemes_padded.size(1), dtype=phonemes_padded.dtype, device=phonemes_padded.device)
+        phonemes_padded = torch.cat([phonemes_padded, padding], dim=1)
+
     return words_padded, phonemes_padded
 
 # Collate function for Format 2: (inputs, targets, mask)
@@ -157,6 +170,24 @@ def collate_fn_format2(batch):
     phonemes_padded = nn.utils.rnn.pad_sequence(phonemes, batch_first=True)
     masks_padded = nn.utils.rnn.pad_sequence(masks, batch_first=True)
 
+    # Ensure both tensors have the same size
+    max_len = max(words_padded.size(1), phonemes_padded.size(1))
+
+    # Pad words if needed
+    if words_padded.size(1) < max_len:
+        padding = torch.zeros(words_padded.size(0), max_len - words_padded.size(1), dtype=words_padded.dtype, device=words_padded.device)
+        words_padded = torch.cat([words_padded, padding], dim=1)
+
+    # Pad phonemes if needed
+    if phonemes_padded.size(1) < max_len:
+        padding = torch.zeros(phonemes_padded.size(0), max_len - phonemes_padded.size(1), dtype=phonemes_padded.dtype, device=phonemes_padded.device)
+        phonemes_padded = torch.cat([phonemes_padded, padding], dim=1)
+
+    # Also pad the masks to match phonemes
+    if masks_padded.size(1) < max_len:
+        mask_padding = torch.zeros(masks_padded.size(0), max_len - masks_padded.size(1), dtype=masks_padded.dtype, device=masks_padded.device)
+        masks_padded = torch.cat([masks_padded, mask_padding], dim=1)
+
     return words_padded, phonemes_padded, masks_padded
 
 # Collate function for Format 3: (inputs, targets, input_mask, target_mask)
@@ -171,16 +202,40 @@ def collate_fn_format3(batch):
     # Pad the sequences
     words_padded = nn.utils.rnn.pad_sequence(words, batch_first=True)
     phonemes_padded = nn.utils.rnn.pad_sequence(phonemes, batch_first=True)
-    input_masks_padded = nn.utils.rnn.pad_sequence(input_masks, batch_first=True)
+    output_masks_padded = nn.utils.rnn.pad_sequence(input_masks, batch_first=True)
     target_masks_padded = nn.utils.rnn.pad_sequence(target_masks, batch_first=True)
 
-    return words_padded, phonemes_padded, input_masks_padded, target_masks_padded
+    # Ensure both tensors have the same size
+    max_len = max(words_padded.size(1), phonemes_padded.size(1))
+
+    # Pad words if needed
+    if words_padded.size(1) < max_len:
+        padding = torch.zeros(words_padded.size(0), max_len - words_padded.size(1), dtype=words_padded.dtype, device=words_padded.device)
+        words_padded = torch.cat([words_padded, padding], dim=1)
+
+    # Pad phonemes if needed
+    if phonemes_padded.size(1) < max_len:
+        padding = torch.zeros(phonemes_padded.size(0), max_len - phonemes_padded.size(1), dtype=phonemes_padded.dtype, device=phonemes_padded.device)
+        phonemes_padded = torch.cat([phonemes_padded, padding], dim=1)
+
+    # Also pad the target masks to match phonemes
+    if target_masks_padded.size(1) < max_len:
+        mask_padding = torch.zeros(target_masks_padded.size(0), max_len - target_masks_padded.size(1), dtype=target_masks_padded.dtype, device=target_masks_padded.device)
+        target_masks_padded = torch.cat([target_masks_padded, mask_padding], dim=1)
+
+    # Also pad the input masks to match words
+    if output_masks_padded.size(1) < max_len:
+        mask_padding = torch.zeros(output_masks_padded.size(0), max_len - output_masks_padded.size(1), dtype=output_masks_padded.dtype, device=output_masks_padded.device)
+        output_masks_padded = torch.cat([output_masks_padded, mask_padding], dim=1)
+
+
+    return words_padded, phonemes_padded, output_masks_padded, target_masks_padded
 
 # For backward compatibility
 collate_fn = collate_fn_format2
 
 # Custom loss function
-def phonetic_loss_fn(outputs, targets, target_mask, input_mask=None):
+def phonetic_loss_fn(outputs, targets):
     # Remove debug print statements for clarity
 
     # Ensure outputs is a tensor
@@ -196,85 +251,7 @@ def phonetic_loss_fn(outputs, targets, target_mask, input_mask=None):
         else:
             raise TypeError(f"Expected targets to be a tensor, got {type(targets)}")
 
-    # Ensure target_mask is a tensor or convert it to one
-    if not isinstance(target_mask, torch.Tensor):
-        if isinstance(target_mask, tuple) and len(target_mask) > 0:
-            target_mask = target_mask[0]  # Take the first element if it's a tuple
-            if not isinstance(target_mask, torch.Tensor):
-                if isinstance(target_mask, bool):
-                    # Create a tensor with all True values with the same shape as targets
-                    target_mask = torch.ones_like(targets, dtype=torch.bool)
-                else:
-                    raise TypeError(f"Expected target_mask[0] to be a tensor or bool, got {type(target_mask)}")
-        elif isinstance(target_mask, bool):
-            # Create a tensor with all True values with the same shape as targets
-            target_mask = torch.ones_like(targets, dtype=torch.bool)
-        else:
-            raise TypeError(f"Expected target_mask to be a tensor or bool, got {type(target_mask)}")
-
-    # input_mask is optional and not used in this loss function
-    # but we include it for compatibility with the encoder's calculate_code_length method
-
-    # Get the dimensions
-    batch_size, seq_len, output_size = outputs.shape
-
-    # If the batch sizes don't match, we need to handle this case
-    if batch_size != targets.size(0) or batch_size != target_mask.size(0):
-        # If outputs has batch size 1, we need to repeat it to match the batch size of targets and mask
-        if batch_size == 1:
-            outputs = outputs.repeat(targets.size(0), 1, 1)
-            batch_size = outputs.shape[0]
-        # If targets has batch size 1, we need to repeat it to match the batch size of outputs
-        elif targets.size(0) == 1:
-            targets = targets.repeat(batch_size, 1)
-        # If mask has batch size 1, we need to repeat it to match the batch size of outputs
-        elif target_mask.size(0) == 1:
-            target_mask = target_mask.repeat(batch_size, 1)
-        else:
-            # If the batch sizes are different and neither is 1, we can't handle this case
-            raise ValueError(f"Batch size mismatch: outputs {batch_size}, targets {targets.size(0)}, target_mask {target_mask.size(0)}")
-
-    # Make sure targets and mask have the right shape
-    if targets.dim() == 2:
-        targets_seq_len = targets.size(1)
-    else:
-        targets_seq_len = 1
-
-    if target_mask.dim() == 2:
-        mask_seq_len = target_mask.size(1)
-    else:
-        mask_seq_len = 1
-
-    # Ensure all sequences have the same length by padding or truncating
-    min_seq_len = min(seq_len, targets_seq_len, mask_seq_len)
-
-    # Truncate if necessary
-    outputs = outputs[:, :min_seq_len, :]
-    if targets.dim() == 2:
-        targets = targets[:, :min_seq_len]
-    if target_mask.dim() == 2:
-        target_mask = target_mask[:, :min_seq_len]
-
-    # Reshape outputs to [batch_size * min_seq_len, output_size]
-    outputs = outputs.reshape(-1, output_size)
-
-    # Reshape targets to [batch_size * min_seq_len]
-    targets = targets.reshape(-1)
-
-    # Reshape mask to [batch_size * min_seq_len]
-    target_mask = target_mask.reshape(-1)
-
-    # Apply the mask
-    masked_outputs = outputs[target_mask]
-    masked_targets = targets[target_mask]
-
-    # Check if target indices are within bounds
-    output_size = masked_outputs.size(-1)
-    if torch.any(masked_targets >= output_size):
-        raise ValueError(f"Error: Target indices out of bounds. Target max: {masked_targets.max().item()}, Output size: {output_size}. The model's output size is too small for the dataset.")
-
-    # Calculate cross entropy loss
-    return F.cross_entropy(masked_outputs, masked_targets, reduction='none')
+    return F.cross_entropy(outputs, targets, reduction='none')
 
 def main():
     # Set random seed for reproducibility
@@ -433,7 +410,7 @@ def test_format2(data_path):
         patience=5,
         collate_fn=collate_fn_format2,
         use_device_handling=False,
-        
+
     )
 
     print(f"Block Encoder (Format 2) - Code length: {code_length}.")

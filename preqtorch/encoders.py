@@ -127,24 +127,8 @@ class PrequentialEncoder:
 
         The encoding function applies masks to outputs and targets before computing the loss.
         """
-        def encoding_fn(outputs, targets, target_mask, output_mask=None):
-            try:
-                # Apply masks to outputs and targets
-                if output_mask is not None:
-                    masked_outputs = outputs[output_mask]
-                else:
-                    masked_outputs = outputs
-
-                masked_targets = targets[target_mask]
-
-                return torch.nn.functional.cross_entropy(masked_outputs, masked_targets, reduction='none')
-            except RuntimeError as e:
-                if "Expected all tensors to be on the same device" in str(e):
-                    raise RuntimeError(
-                        "Device mismatch error. Please ensure your model handles device placement "
-                        "for inputs and outputs in its forward method."
-                    ) from e
-                raise
+        def encoding_fn(outputs, targets):
+            return torch.nn.functional.cross_entropy(outputs, targets, reduction='none')/torch.log(2)
         return encoding_fn
 
     def _get_optimizer(self, model, learning_rate):
@@ -285,7 +269,7 @@ class BlockEncoder(PrequentialEncoder):
         outputs = model(inputs)
 
         # Apply masks to outputs and targets before passing to encoding_fn
-        code_lengths = encoding_fn(outputs, target, target_mask, output_mask)
+        code_lengths = encoding_fn(outputs[output_mask], target[target_mask])
         return code_lengths, inputs, target, target_mask, output_mask
 
     def initialize(self, dataset, stop_points, batch_size, learning_rate, seed,
@@ -563,7 +547,7 @@ class MIREncoder(PrequentialEncoder):
                 outputs = outputs * F.softplus(beta)
 
             # Apply masks to outputs and targets before passing to encoding_fn
-            code_lengths = encoding_fn(outputs, target, target_mask, output_mask)
+            code_lengths = encoding_fn(outputs[output_mask], target[target_mask])
 
             # Restore original weights if EMA was used
             if ema_params is not None:
