@@ -1,6 +1,6 @@
 # PreqTorch
 
-A PyTorch-based library for calculating the prequential codelength of datasets. This ttolkit allows for calculating the stoachastic complexity of a dataset given it and a model class.
+A PyTorch-based library for calculating the prequential codelength of datasets. This toolkit allows for calculating the stochastic complexity of a dataset given it and a model class.
 
 ## Overview
 
