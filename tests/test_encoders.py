@@ -257,16 +257,15 @@ def main():
     # Set random seed for reproducibility
     torch.manual_seed(42)
 
-    # Path to the Spanish phonetic data
-    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spa_latn_la_broad.tsv")
-
     # Test all three dataset formats
-    test_format1(data_path)
-    test_format2(data_path)
-    test_format3(data_path)
+    test_format1()
+    test_format2()
+    test_format3()
 
-def test_format1(data_path):
+def test_format1():
     """Test encoders with Format 1: (inputs, targets)"""
+    # Define data_path inside the test function
+    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spa_latn_la_broad.tsv")
     print("\n" + "="*80)
     print("TESTING FORMAT 1: (inputs, targets)")
     print("="*80)
@@ -343,8 +342,10 @@ def test_format1(data_path):
 
     print(f"MIR Encoder (Format 1) - Code length: {code_length}.")
 
-def test_format2(data_path):
+def test_format2():
     """Test encoders with Format 2: (inputs, targets, mask)"""
+    # Define data_path inside the test function
+    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spa_latn_la_broad.tsv")
     print("\n" + "="*80)
     print("TESTING FORMAT 2: (inputs, targets, mask)")
     print("="*80)
@@ -448,8 +449,10 @@ def test_format2(data_path):
 
     print(f"MIR Encoder (Format 2) - Code length: {code_length}.")
 
-def test_format3(data_path):
+def test_format3():
     """Test encoders with Format 3: (inputs, targets, input_mask, target_mask)"""
+    # Define data_path inside the test function
+    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spa_latn_la_broad.tsv")
     print("\n" + "="*80)
     print("TESTING FORMAT 3: (inputs, targets, input_mask, target_mask)")
     print("="*80)
