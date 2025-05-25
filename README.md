@@ -32,30 +32,25 @@ PreqTorch has the following requirements:
 - PyTorch 1.7+
 - NumPy
 
-## Dataset Requirements
+
+# Usage
+
+I built this package to stop myself from rewriting the same prequential encoding process over and over. For this reason, the package wraps your dataset, model, and if necessary, a collate function and encoding (loss) function.
+
+The rest of the document will review the required formats for each of these. In my first iteration I've tried to strike a balance between flexibility and brevity.
+
+### Dataset formatting
 
 For PreqTorch to work properly, your datasets must:
 
 1. Be organized as tuples of tensors or tuples of tuples including tensors
 2. Return data in one of the following formats:
    - `(inputs, targets)` - Basic format without masks
-   - `(inputs, targets, mask)` - Format with a shared mask for both inputs and targets
+   - `(inputs, targets, mask)` - Format with a shared mask for both model outputs and targets
    - `(inputs, targets, output_mask, target_mask)` - Format with separate masks for outputs and targets
 3. Be compatible with PyTorch's Dataset class
 
-## Encoding function
-
-By default encoders will attempt to use cross entropy loss, returning code lengths calculated from the loss in units of bits. However, a custom encoding function may be supplied. No matter what function is supplied, it will be called like this:
-
-```python
-code_lengths = encoding_fn(outputs, target, output_mask, target_mask)
-```
-
-You can write the function however you wish! But understand that this is the call that will be made internally.
-
-## Usage
-
-### Collate Function Requirement
+### Collate Function
 
 When using PreqTorch encoders, you may provide your own collate function at creation time. This function should:
 
@@ -116,6 +111,21 @@ def separate_masks_collate_fn(batch):
 
     return inputs, targets, output_masks, target_masks
 ```
+
+### Encoding Function
+
+By default encoders will attempt to use cross entropy loss, returning code lengths calculated from the loss in units of bits. However, a custom encoding function may be supplied. No matter what function is supplied, it will be called like this:
+
+```python
+code_lengths = encoding_fn(outputs, target, output_mask, target_mask)
+```
+
+You can write the function however you wish! But understand that this is the call that will be made internally.
+
+
+## Encoders
+
+The package supports two types of prequential encoders, themselves approximations of true prequential encoding (which is unwieldy).
 
 ### Block Encoding
 
