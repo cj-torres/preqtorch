@@ -1,9 +1,8 @@
 # Import from the preqtorch package
 from .utils import ModelClass
 from .replay import ReplayStreams, ReplayBuffer, Replay, ReplayingDataLoader
-from .encoders import BlockEncoder, MIREncoder, PrequentialEncoder
+from .encoders import BlockEncoder, MIREncoder, PrequentialEncoder, EncoderState
 
-# from .preqtorch.__init__ import __version__
 
 __all__ = [
     'PrequentialEncoder',
@@ -15,5 +14,4 @@ __all__ = [
     'ReplayStreams',
     'ReplayBuffer',
     'ReplayingDataLoader',
-    '__version__'
 ]

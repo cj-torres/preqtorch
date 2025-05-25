@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "preqtorch"
-version = "0.0.2"
+version = "0.0.3"
 authors = [
   { name="Charles Torres", email="torrescj92@gmail.com" },
 ]
@@ -27,7 +27,7 @@ Homepage = "https://github.com/torrescj/preqtorch"
 Issues = "https://github.com/torrescj/preqtorch/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/preqtorch"]
+packages = ["preqtorch"]
 
 [tool.hatch.build.targets.sdist]
 include = [
