@@ -235,7 +235,7 @@ def collate_fn_format3(batch):
 collate_fn = collate_fn_format2
 
 # Custom loss function
-def phonetic_loss_fn(outputs, targets):
+def phonetic_loss_fn(outputs, targets, output_mask, target_mask):
     # Remove debug print statements for clarity
 
     # Ensure outputs is a tensor
@@ -251,7 +251,11 @@ def phonetic_loss_fn(outputs, targets):
         else:
             raise TypeError(f"Expected targets to be a tensor, got {type(targets)}")
 
-    return F.cross_entropy(outputs, targets, reduction='none')
+    # Apply masks to outputs and targets
+    masked_outputs = outputs[output_mask]
+    masked_targets = targets[target_mask]
+
+    return F.cross_entropy(masked_outputs, masked_targets, reduction='none')
 
 def main():
     # Set random seed for reproducibility
@@ -329,7 +333,7 @@ def test_format1():
     model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
         dataset=dataset,
         set_name="Spanish Phonetic (MIR, Format 1)",
-        n_replay_streams=2,
+        n_replay_samples=2,
         learning_rate=0.001,
         batch_size=32,
         seed=42,
@@ -436,7 +440,7 @@ def test_format2():
     model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
         dataset=dataset,
         set_name="Spanish Phonetic (MIR, Format 2)",
-        n_replay_streams=2,
+        n_replay_samples=2,
         learning_rate=0.001,
         batch_size=32,
         seed=42,
@@ -516,7 +520,7 @@ def test_format3():
     model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
         dataset=dataset,
         set_name="Spanish Phonetic (MIR, Format 3)",
-        n_replay_streams=2,
+        n_replay_samples=2,
         learning_rate=0.001,
         batch_size=32,
         seed=42,

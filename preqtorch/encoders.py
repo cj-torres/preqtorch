@@ -125,10 +125,11 @@ class PrequentialEncoder:
         Returns the default encoding function if none is provided.
         The encoding function returns per-sample code lengths.
 
-        The encoding function applies masks to outputs and targets before computing the loss.
+        The encoding function takes outputs, targets, output_mask, and target_mask as parameters
+        and applies the masks before computing the loss.
         """
-        def encoding_fn(outputs, targets):
-            return torch.nn.functional.cross_entropy(outputs, targets, reduction='none')/torch.log(2)
+        def encoding_fn(outputs, targets, output_mask, target_mask):
+            return torch.nn.functional.cross_entropy(outputs[output_mask], targets[target_mask], reduction='none')/torch.log(2)
         return encoding_fn
 
     def _get_optimizer(self, model, learning_rate):
@@ -268,8 +269,8 @@ class BlockEncoder(PrequentialEncoder):
         # Generate model outputs
         outputs = model(inputs)
 
-        # Apply masks to outputs and targets before passing to encoding_fn
-        code_lengths = encoding_fn(outputs[output_mask], target[target_mask])
+        # Pass outputs, targets, and masks to encoding_fn
+        code_lengths = encoding_fn(outputs, target, output_mask, target_mask)
         return code_lengths, inputs, target, target_mask, output_mask
 
     def initialize(self, dataset, stop_points, batch_size, learning_rate, seed,
@@ -350,8 +351,8 @@ class MIREncoder(PrequentialEncoder):
     def __init__(self, model_class, loss_fn=None, device=None, optimizer_fn=None):
         super().__init__(model_class, loss_fn, device, optimizer_fn)
 
-    def encode(self, dataset, set_name, n_replay_streams, learning_rate=1e-4, batch_size=32, 
-               seed=42, alpha=0.1, collate_fn=None, use_device_handling=True, use_beta=True, 
+    def encode(self, dataset, set_name, n_replay_samples, learning_rate=1e-4, batch_size=32,
+               seed=42, alpha=0.1, collate_fn=None, use_device_handling=True, use_beta=True,
                use_ema=True, shuffle=True, num_samples=None, replay_type="buffer"):
         """
         One-shot method to encode the data using the MIR prequential coding method.
@@ -364,7 +365,7 @@ class MIREncoder(PrequentialEncoder):
         Args:
             dataset: The dataset to encode
             set_name: Name of the dataset (for logging)
-            n_replay_streams: Number of replay streams or buffer size
+            n_replay_samples: Number of replay streams or buffer size
             learning_rate: Learning rate for the optimizer
             batch_size: Batch size for training
             seed: Random seed for reproducibility
@@ -399,7 +400,7 @@ class MIREncoder(PrequentialEncoder):
 
         # Initialize the encoder
         state, replay_loader = self.initialize(
-            dataset, batch_size, seed, n_replay_streams, replay_type,
+            dataset, batch_size, seed, n_replay_samples, replay_type,
             None, learning_rate, alpha, collate_fn, shuffle)
 
         # If not using beta or EMA, set them to None
@@ -418,7 +419,7 @@ class MIREncoder(PrequentialEncoder):
         model, code_length, history, ema_params, beta = self.finalize(state)
         return model, code_length, history, ema_params, beta, replay_loader.replay
 
-    def initialize(self, dataset, batch_size, seed, n_replay_streams, replay_type="buffer",
+    def initialize(self, dataset, batch_size, seed, n_replay_samples, replay_type="buffer",
                    model=None, learning_rate=1e-4, alpha=0.1, collate_fn=None, shuffle=True):
         """
         Initializes model, replay loader, optimizer, and state tracking.
@@ -435,9 +436,9 @@ class MIREncoder(PrequentialEncoder):
 
         # Select replay type
         if replay_type == "streams":
-            replay_impl = ReplayStreams(dataset, batch_size=batch_size, n_streams=n_replay_streams, collate_fn=collate_fn)
+            replay_impl = ReplayStreams(dataset, batch_size=batch_size, n_streams=n_replay_samples, collate_fn=collate_fn)
         elif replay_type == "buffer":
-            replay_impl = ReplayBuffer(dataset, batch_size=batch_size, n_samples=n_replay_streams, collate_fn=collate_fn)
+            replay_impl = ReplayBuffer(dataset, batch_size=batch_size, n_samples=n_replay_samples, collate_fn=collate_fn)
         else:
             raise ValueError("replay_type must be 'streams' or 'buffer'")
 
@@ -546,8 +547,8 @@ class MIREncoder(PrequentialEncoder):
             if beta is not None:
                 outputs = outputs * F.softplus(beta)
 
-            # Apply masks to outputs and targets before passing to encoding_fn
-            code_lengths = encoding_fn(outputs[output_mask], target[target_mask])
+            # Pass outputs, targets, and masks to encoding_fn
+            code_lengths = encoding_fn(outputs, target, output_mask, target_mask)
 
             # Restore original weights if EMA was used
             if ema_params is not None:

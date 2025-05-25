@@ -1,6 +1,6 @@
 # PreqTorch
 
-A PyTorch-based library for prequentially encoding datasets and clustering.
+A PyTorch-based library for calculating the prequential codelength of datasets. This ttolkit allows for calculating the stoachastic complexity of a dataset given it and a model class.
 
 ## Overview
 
@@ -20,7 +20,7 @@ pip install preqtorch
 ### From Source
 
 ```bash
-git clone https://github.com/torrescj/preqtorch.git
+git clone https://github.com/cj-torres/preqtorch.git
 cd preqtorch
 pip install -e .
 ```
@@ -43,16 +43,26 @@ For PreqTorch to work properly, your datasets must:
    - `(inputs, targets, output_mask, target_mask)` - Format with separate masks for outputs and targets
 3. Be compatible with PyTorch's Dataset class
 
+## Encoding function
+
+By default encoders will attempt to use cross entropy loss, returning code lengths calculated from the loss in units of bits. However, a custom encoding function may be supplied. No matter what function is supplied, it will be called like this:
+
+```python
+code_lengths = encoding_fn(outputs, target, output_mask, target_mask)
+```
+
+You can write the function however you wish! But understand that this is the call that will be made internally.
+
 ## Usage
 
 ### Collate Function Requirement
 
-When using PreqTorch encoders, you **must provide your own collate function** at creation time. This function should:
+When using PreqTorch encoders, you may provide your own collate function at creation time. This function should:
 
 - Take a batch of samples and combine them into a single batch
 - Return data in one of the supported formats:
   - `(inputs, targets)`
-  - `(inputs, targets, mask)` - shared mask for both inputs and targets
+  - `(inputs, targets, mask)` - shared mask for both model outputs and targets
   - `(inputs, targets, output_mask, target_mask)` - separate masks for outputs and targets
 - Handle any specific requirements of your dataset
 
@@ -109,7 +119,7 @@ def separate_masks_collate_fn(batch):
 
 ### Block Encoding
 
-Block encoding divides the dataset into blocks and trains the model on each block sequentially.
+Block encoding divides the dataset into blocks and trains the model on each block sequentially. See Blier, et al. (2018) for details.
 
 ```python
 import torch
@@ -134,7 +144,7 @@ encoder = BlockEncoder(
 model, code_length, history = encoder.encode(
     dataset=my_dataset,
     set_name="My Dataset",
-    stop_points=[0.25, 0.5, 0.75, 1.0],  # Points where to stop and evaluate
+    stop_points=[0.125, 0.25, 0.5, 1.0],  # Points (in proportion) to stop and evaluate
     batch_size=32,
     seed=42,
     learning_rate=0.001,
@@ -146,7 +156,7 @@ model, code_length, history = encoder.encode(
 
 ### MIR Encoding
 
-MIR (Mini-batch Incremental/Replay) encoding uses replay buffers or streams to revisit previous data.
+MIR (Mini-batch Incremental/Replay) encoding uses replay buffers or streams to revisit previous data. See Bornschein, et al. (2022) for details.
 
 ```python
 from preqtorch import MIREncoder
@@ -161,7 +171,7 @@ encoder = MIREncoder(
 model, code_length, history, ema_params, beta, replay = encoder.encode(
     dataset=my_dataset,
     set_name="My Dataset",
-    n_replay_streams=2,  # Number of replay streams or buffer size
+    n_replay_samples=2,  # Number of replay streams or buffer size
     learning_rate=0.001,
     batch_size=32,
     seed=42,
@@ -176,3 +186,9 @@ model, code_length, history, ema_params, beta, replay = encoder.encode(
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## See also
+
+Bornschein, J., Li, Y., & Hutter, M. (2022). Sequential learning of neural networks for prequential mdl. arXiv preprint arXiv:2210.07931.
+
+Blier, L., & Ollivier, Y. (2018). The description length of deep learning models. Advances in Neural Information Processing Systems, 31.
