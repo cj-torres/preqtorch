@@ -8,7 +8,7 @@ version = "0.1.0"
 authors = [
   { name="Charles Torres", email="torrescj92@gmail.com" },
 ]
-description = "A package for prequential coding and clustering in PyTorch."
+description = "A package for prequential coding in PyTorch."
 readme = "README.md"
 requires-python = ">=3.11"
 classifiers = [
@@ -23,8 +23,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/torrescj/preqtorch"
-Issues = "https://github.com/torrescj/preqtorch/issues"
+Homepage = "https://github.com/cj-torres/preqtorch"
+Issues = "https://github.com/cj-torres/preqtorch/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["preqtorch"]
