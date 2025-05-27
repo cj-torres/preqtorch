@@ -4,11 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "preqtorch"
-version = "0.1.0"
+version = "0.1.1"
 authors = [
   { name="Charles Torres", email="torrescj92@gmail.com" },
 ]
-description = "A package for prequential coding in PyTorch."
+description = "A package for prequential coding using PyTorch."
 readme = "README.md"
 requires-python = ">=3.11"
 classifiers = [

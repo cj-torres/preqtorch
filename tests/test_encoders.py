@@ -266,6 +266,9 @@ def main():
     test_format2()
     test_format3()
 
+    # Test default encoding function
+    test_default_encoding_fn()
+
 def test_format1():
     """Test encoders with Format 1: (inputs, targets)"""
     # Define data_path inside the test function
@@ -532,6 +535,86 @@ def test_format3():
     )
 
     print(f"MIR Encoder (Format 3) - Code length: {code_length}.")
+
+def test_default_encoding_fn():
+    """Test encoders with the default encoding function"""
+    # Define data_path inside the test function
+    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spa_latn_la_broad.tsv")
+    print("\n" + "="*80)
+    print("TESTING DEFAULT ENCODING FUNCTION")
+    print("="*80)
+
+    # Create the dataset
+    dataset = SpanishPhoneticDatasetFormat3(data_path, max_samples=500)
+
+    print(f"Dataset size: {len(dataset)}")
+    print(f"Number of characters: {len(dataset.char_to_idx)}")
+    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
+
+    # Test BlockEncoder with default encoding function
+    print("\nTesting BlockEncoder with default encoding function...")
+    model_class = ModelClass(
+        model=SimplePhoneticModel,
+        device='cpu',
+        kwargs={
+            'input_size': len(dataset.char_to_idx),
+            'hidden_size': 64,
+            'output_size': len(dataset.phoneme_to_idx)
+        }
+    )
+    # Note: No loss_fn provided, so it will use the default encoding function
+    block_encoder = BlockEncoder(
+        model_class=model_class
+    )
+
+    # Encode with BlockEncoder (one-shot approach)
+    model, code_length, code_length_history = block_encoder.encode(
+        dataset=dataset,
+        set_name="Spanish Phonetic (Block, Default Encoding)",
+        epochs=2,
+        learning_rate=0.001,
+        batch_size=32,
+        seed=42,
+        stop_points=[0.5, 1.0],
+        patience=5,
+        collate_fn=collate_fn_format3,
+        use_device_handling=False
+    )
+
+    print(f"Block Encoder (Default Encoding) - Code length: {code_length}.")
+
+    # Test MIREncoder with default encoding function
+    print("\nTesting MIREncoder with default encoding function...")
+    model_class = ModelClass(
+        model=SimplePhoneticModel,
+        device='cpu',
+        kwargs={
+            'input_size': len(dataset.char_to_idx),
+            'hidden_size': 64,
+            'output_size': len(dataset.phoneme_to_idx)
+        }
+    )
+    # Note: No loss_fn provided, so it will use the default encoding function
+    mir_encoder = MIREncoder(
+        model_class=model_class
+    )
+
+    # Encode with MIREncoder (one-shot approach)
+    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
+        dataset=dataset,
+        set_name="Spanish Phonetic (MIR, Default Encoding)",
+        n_replay_samples=2,
+        learning_rate=0.001,
+        batch_size=32,
+        seed=42,
+        alpha=0.1,
+        collate_fn=collate_fn_format3,
+        use_device_handling=False,
+        use_beta=True,
+        use_ema=True
+    )
+
+    print(f"MIR Encoder (Default Encoding) - Code length: {code_length}.")
 
 if __name__ == "__main__":
     main()

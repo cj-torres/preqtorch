@@ -80,7 +80,8 @@ class PrequentialEncoder:
         Move an object to the device.
 
         If the object is a tensor, move it to the device.
-        If the object is a tuple, recursively move each element to the device if it's a tensor.
+        If the object is a tuple or list, recursively move each element to the device.
+        If the object is a dictionary, recursively move each value to the device.
         Otherwise, leave the object as is.
 
         Args:
@@ -90,9 +91,16 @@ class PrequentialEncoder:
             The object moved to the device
         """
         if isinstance(obj, torch.Tensor):
+            # Check if tensor is already on the target device
+            if obj.device == self.device or obj.device == torch.device(self.device):
+                return obj
             return obj.to(self.device)
         elif isinstance(obj, tuple):
             return tuple(self._move_to_device(item) for item in obj)
+        elif isinstance(obj, list):
+            return [self._move_to_device(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {key: self._move_to_device(value) for key, value in obj.items()}
         else:
             return obj
 
@@ -101,7 +109,8 @@ class PrequentialEncoder:
         Move an object to CPU if the current device is not CPU.
 
         If the object is a tensor and the current device is not CPU, move it to CPU.
-        If the object is a tuple, recursively move each element to CPU if it's a tensor.
+        If the object is a tuple or list, recursively move each element to CPU.
+        If the object is a dictionary, recursively move each value to CPU.
         Otherwise, leave the object as is.
 
         Args:
@@ -110,13 +119,21 @@ class PrequentialEncoder:
         Returns:
             The object moved to CPU if needed
         """
+        # If the encoder is already on CPU, return the object as is
         if self.device == 'cpu' or self.device == torch.device('cpu'):
             return obj
 
         if isinstance(obj, torch.Tensor):
+            # Check if tensor is already on CPU
+            if obj.device.type == 'cpu':
+                return obj
             return obj.cpu()
         elif isinstance(obj, tuple):
             return tuple(self._move_to_cpu(item) for item in obj)
+        elif isinstance(obj, list):
+            return [self._move_to_cpu(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {key: self._move_to_cpu(value) for key, value in obj.items()}
         else:
             return obj
 
@@ -129,7 +146,7 @@ class PrequentialEncoder:
         and applies the masks before computing the loss.
         """
         def encoding_fn(outputs, targets, output_mask, target_mask):
-            return torch.nn.functional.cross_entropy(outputs[output_mask], targets[target_mask], reduction='none')/torch.log(2)
+            return torch.nn.functional.cross_entropy(outputs[output_mask], targets[target_mask], reduction='none')/torch.log(torch.tensor(2.0, device=outputs.device))
         return encoding_fn
 
     def _get_optimizer(self, model, learning_rate):
