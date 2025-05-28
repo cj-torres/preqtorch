@@ -418,15 +418,7 @@ class MIREncoder(PrequentialEncoder):
         # Initialize the encoder
         state, replay_loader = self.initialize(
             dataset, batch_size, seed, n_replay_samples, replay_type,
-            None, learning_rate, alpha, collate_fn, shuffle)
-
-        # If not using beta or EMA, set them to None
-        if not use_beta:
-            state.beta = None
-            state.beta_optim = None
-
-        if not use_ema:
-            state.ema_params = None
+            None, learning_rate, alpha, collate_fn, shuffle, use_beta, use_ema)
 
         # Process each batch
         for batch in replay_loader:
@@ -437,7 +429,8 @@ class MIREncoder(PrequentialEncoder):
         return model, code_length, history, ema_params, beta, replay_loader.replay
 
     def initialize(self, dataset, batch_size, seed, n_replay_samples, replay_type="buffer",
-                   model=None, learning_rate=1e-4, alpha=0.1, collate_fn=None, shuffle=True):
+                   model=None, learning_rate=1e-4, alpha=0.1, collate_fn=None, shuffle=True, use_beta=True,
+                   use_ema=False):
         """
         Initializes model, replay loader, optimizer, and state tracking.
         """
@@ -448,8 +441,12 @@ class MIREncoder(PrequentialEncoder):
         model.to(self.device)
 
         optim = self._get_optimizer(model, learning_rate)
-        beta = torch.nn.Parameter(torch.tensor(0.0, device=self.device))
-        beta_optim = torch.optim.Adam([beta], lr=learning_rate)
+        if use_beta:
+            beta = torch.nn.Parameter(torch.tensor(0.0, device=self.device))
+            beta_optim = torch.optim.Adam([beta], lr=learning_rate)
+        else:
+            beta = None
+            beta_optim = None
 
         # Select replay type
         if replay_type == "streams":
@@ -462,8 +459,12 @@ class MIREncoder(PrequentialEncoder):
         replay_loader = ReplayingDataLoader(dataset, batch_size=batch_size, replay=replay_impl,
                                             collate_fn=collate_fn, shuffle=shuffle)
 
-        ema_params = {name: param.clone().detach() for name, param in model.named_parameters()}
-        trained_params = {name: param.clone().detach() for name, param in model.named_parameters()}
+        if use_ema:
+            ema_params = {name: param.clone().detach() for name, param in model.named_parameters()}
+            trained_params = {name: param.clone().detach() for name, param in model.named_parameters()}
+        else:
+            ema_params = None
+            trained_params = {name: param.clone().detach() for name, param in model.named_parameters()}
 
         state = EncoderState(model, optim, beta, beta_optim, ema_params, trained_params)
         return state, replay_loader
