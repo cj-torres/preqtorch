@@ -12,7 +12,7 @@ class ModelClass:
     with consistent initialization strategies. It ensures models are properly
     initialized with Xavier/Uniform weights and handles device placement.
     """
-    def __init__(self, model: type, device: str, kwargs: dict = None):
+    def __init__(self, model: type, device: str, kwargs: dict = None, init_func=None):
         """
         Initialize the ModelClass wrapper.
 
@@ -20,10 +20,13 @@ class ModelClass:
             model (type): A torch.nn.Module subclass (not instance) to be wrapped
             device (str): The device to place models on ('cpu' or 'cuda')
             kwargs (dict): Optional keyword arguments to pass to the model constructor
+            init_func (callable, optional): Custom initialization function for model parameters.
+                                           If None, default initialization is used.
         """
         assert issubclass(model, torch.nn.Module), "model must be a subclass of torch.nn.Module"
         self.model = model
         self.device = device
+        self.init_func = init_func
         if kwargs:
             self.kwargs = kwargs
         else:
@@ -42,18 +45,24 @@ class ModelClass:
     def initialize(self):
         """
         Creates and initializes a new instance of the model.
-    
+        If a custom initialization function was provided, it will be used.
+        Otherwise, the default initialization strategy will be applied.
+
         Returns:
             torch.nn.Module: A newly initialized model instance on the specified device
         """
         new_model = self.model(**self.kwargs)
         new_model.to(self.device)
-        return self._initialize_model(new_model)
+
+        if self.init_func is not None:
+            return self.init_func(new_model)
+        else:
+            return self._initialize_model(new_model)
 
     def to(self, device):
         """
         Updates the target device for future model instantiations.
-    
+
         Args:
             device (str): The new target device ('cpu' or 'cuda')
         """
@@ -66,10 +75,10 @@ class ModelClass:
         - Xavier uniform initialization for weight matrices
         - Zero initialization for bias vectors
         - Uniform [-1, 1] initialization for other parameters
-    
+
         Args:
             model (torch.nn.Module): The model to initialize
-    
+
         Returns:
             torch.nn.Module: The initialized model
         """
@@ -82,8 +91,3 @@ class ModelClass:
             else:  # else uniform initialization, even on [-1, 1]
                 torch.nn.init.uniform_(param, a=-1.0, b=1.0)
         return model
-
-
-
-
-

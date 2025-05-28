@@ -127,7 +127,6 @@ class ReplayingDataLoader:
         )
         self.iterator = iter(self.loader)
         self.samples_since_replay = 0
-        self.warned = False
 
     def __iter__(self):
         return self
@@ -143,7 +142,9 @@ class ReplayingDataLoader:
         self.samples_since_replay += 1
         return batch
 
+    def __len__(self):
+        return len(self.indexed_dataset)
+
     def sample_replay(self):
         self.samples_since_replay = 0
-        self.warned = False
         return self.replay.sample()

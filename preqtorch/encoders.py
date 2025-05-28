@@ -80,7 +80,8 @@ class PrequentialEncoder:
         Move an object to the device.
 
         If the object is a tensor, move it to the device.
-        If the object is a tuple, recursively move each element to the device if it's a tensor.
+        If the object is a tuple or list, recursively move each element to the device.
+        If the object is a dictionary, recursively move each value to the device.
         Otherwise, leave the object as is.
 
         Args:
@@ -90,9 +91,16 @@ class PrequentialEncoder:
             The object moved to the device
         """
         if isinstance(obj, torch.Tensor):
+            # Check if tensor is already on the target device
+            if obj.device == self.device or obj.device == torch.device(self.device):
+                return obj
             return obj.to(self.device)
         elif isinstance(obj, tuple):
             return tuple(self._move_to_device(item) for item in obj)
+        elif isinstance(obj, list):
+            return [self._move_to_device(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {key: self._move_to_device(value) for key, value in obj.items()}
         else:
             return obj
 
@@ -101,7 +109,8 @@ class PrequentialEncoder:
         Move an object to CPU if the current device is not CPU.
 
         If the object is a tensor and the current device is not CPU, move it to CPU.
-        If the object is a tuple, recursively move each element to CPU if it's a tensor.
+        If the object is a tuple or list, recursively move each element to CPU.
+        If the object is a dictionary, recursively move each value to CPU.
         Otherwise, leave the object as is.
 
         Args:
@@ -110,13 +119,21 @@ class PrequentialEncoder:
         Returns:
             The object moved to CPU if needed
         """
+        # If the encoder is already on CPU, return the object as is
         if self.device == 'cpu' or self.device == torch.device('cpu'):
             return obj
 
         if isinstance(obj, torch.Tensor):
+            # Check if tensor is already on CPU
+            if obj.device.type == 'cpu':
+                return obj
             return obj.cpu()
         elif isinstance(obj, tuple):
             return tuple(self._move_to_cpu(item) for item in obj)
+        elif isinstance(obj, list):
+            return [self._move_to_cpu(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {key: self._move_to_cpu(value) for key, value in obj.items()}
         else:
             return obj
 
@@ -129,7 +146,7 @@ class PrequentialEncoder:
         and applies the masks before computing the loss.
         """
         def encoding_fn(outputs, targets, output_mask, target_mask):
-            return torch.nn.functional.cross_entropy(outputs[output_mask], targets[target_mask], reduction='none')/torch.log(2)
+            return torch.nn.functional.cross_entropy(outputs[output_mask], targets[target_mask], reduction='none')/torch.log(torch.tensor(2.0, device=outputs.device))
         return encoding_fn
 
     def _get_optimizer(self, model, learning_rate):
@@ -401,15 +418,7 @@ class MIREncoder(PrequentialEncoder):
         # Initialize the encoder
         state, replay_loader = self.initialize(
             dataset, batch_size, seed, n_replay_samples, replay_type,
-            None, learning_rate, alpha, collate_fn, shuffle)
-
-        # If not using beta or EMA, set them to None
-        if not use_beta:
-            state.beta = None
-            state.beta_optim = None
-
-        if not use_ema:
-            state.ema_params = None
+            None, learning_rate, alpha, collate_fn, shuffle, use_beta, use_ema)
 
         # Process each batch
         for batch in replay_loader:
@@ -420,7 +429,8 @@ class MIREncoder(PrequentialEncoder):
         return model, code_length, history, ema_params, beta, replay_loader.replay
 
     def initialize(self, dataset, batch_size, seed, n_replay_samples, replay_type="buffer",
-                   model=None, learning_rate=1e-4, alpha=0.1, collate_fn=None, shuffle=True):
+                   model=None, learning_rate=1e-4, alpha=0.1, collate_fn=None, shuffle=True, use_beta=True,
+                   use_ema=False):
         """
         Initializes model, replay loader, optimizer, and state tracking.
         """
@@ -431,8 +441,12 @@ class MIREncoder(PrequentialEncoder):
         model.to(self.device)
 
         optim = self._get_optimizer(model, learning_rate)
-        beta = torch.nn.Parameter(torch.tensor(0.0, device=self.device))
-        beta_optim = torch.optim.Adam([beta], lr=learning_rate)
+        if use_beta:
+            beta = torch.nn.Parameter(torch.tensor(0.0, device=self.device))
+            beta_optim = torch.optim.Adam([beta], lr=learning_rate)
+        else:
+            beta = None
+            beta_optim = None
 
         # Select replay type
         if replay_type == "streams":
@@ -445,8 +459,12 @@ class MIREncoder(PrequentialEncoder):
         replay_loader = ReplayingDataLoader(dataset, batch_size=batch_size, replay=replay_impl,
                                             collate_fn=collate_fn, shuffle=shuffle)
 
-        ema_params = {name: param.clone().detach() for name, param in model.named_parameters()}
-        trained_params = {name: param.clone().detach() for name, param in model.named_parameters()}
+        if use_ema:
+            ema_params = {name: param.clone().detach() for name, param in model.named_parameters()}
+            trained_params = {name: param.clone().detach() for name, param in model.named_parameters()}
+        else:
+            ema_params = None
+            trained_params = {name: param.clone().detach() for name, param in model.named_parameters()}
 
         state = EncoderState(model, optim, beta, beta_optim, ema_params, trained_params)
         return state, replay_loader
