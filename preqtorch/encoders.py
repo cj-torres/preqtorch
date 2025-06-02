@@ -11,13 +11,14 @@ class EncoderState:
     """
     Holds the state of the encoding process. Allows for pausing/resuming training.
     """
-    def __init__(self, model, optim, beta, beta_optim, ema_params, trained_params):
+    def __init__(self, model, optim, beta, beta_optim, ema_params, trained_params, encoding_fn=None):
         self.model = model
         self.optim = optim
         self.beta = beta
         self.beta_optim = beta_optim
         self.ema_params = ema_params
         self.trained_params = trained_params
+        self.encoding_fn = encoding_fn
         self.code_length = 0
         self.history = []
 
@@ -52,7 +53,6 @@ class PrequentialEncoder:
             optimizer_fn: Function to create optimizer (if None, Adam will be used)
         """
         self.model_class = model_class
-        self.encoding_fn = loss_fn  # Renamed for clarity
         self.device = device if device is not None else ('cuda' if torch.cuda.is_available() else 'cpu')
         # Update the model_class device to match the encoder's device
         if hasattr(self.model_class, 'to'):
@@ -195,7 +195,7 @@ class BlockEncoder(PrequentialEncoder):
 
     def encode(self, dataset, set_name, stop_points, batch_size, seed, 
                learning_rate=1e-4, epochs=50, patience=20, shuffle=True, 
-               collate_fn=None, use_device_handling=True, num_samples=None):
+               collate_fn=None, use_device_handling=True, num_samples=None, encoding_fn=None):
         """
         One-shot method to encode the data using the block-wise prequential coding method.
 
@@ -215,9 +215,9 @@ class BlockEncoder(PrequentialEncoder):
             patience: Number of epochs to wait for improvement before early stopping
             shuffle: Whether to shuffle the data
             collate_fn: Function to collate samples into batches
-            return_code_length_history: Whether to return the code length history
             use_device_handling: Whether to handle device placement in the model
             num_samples: Number of samples to use (if None, use all)
+            encoding_fn: Function to encode the data (if None, will use default)
 
         Returns:
             If return_code_length_history is False:
@@ -235,9 +235,10 @@ class BlockEncoder(PrequentialEncoder):
 
         # Initialize the encoder
         state, train_chunks, eval_chunks, batch_size, shuffle, collate_fn = self.initialize(
-            dataset, stop_points, batch_size, learning_rate, seed, shuffle, collate_fn)
+            dataset, stop_points, batch_size, learning_rate, seed, shuffle, collate_fn, encoding_fn)
 
-        encoding_fn = self.encoding_fn or self._get_default_encoding_fn()
+        # Use encoding_fn from state
+        encoding_fn = state.encoding_fn
 
         initial_weights = deepcopy(state.model.state_dict())
 
@@ -252,14 +253,15 @@ class BlockEncoder(PrequentialEncoder):
                 break
 
             state.model.load_state_dict(deepcopy(initial_weights))
-            self.train_until_patience(state, train_loader, encoding_fn, patience, epochs)
+            self.train_until_patience(state, train_loader, patience, epochs)
 
         print(f"Performance for {set_name}: Prequential code length: {state.code_length}")
 
         return state.model, state.code_length, state.history
 
     def calculate_code_length(self, model, batch, encoding_fn=None):
-        encoding_fn = encoding_fn or self.encoding_fn or self._get_default_encoding_fn()
+        # Use encoding_fn from parameter or fall back to default
+        encoding_fn = encoding_fn or self._get_default_encoding_fn()
         inputs, target = batch[:2]
         inputs = self._move_to_device(inputs)
         target = self._move_to_device(target)
@@ -291,7 +293,7 @@ class BlockEncoder(PrequentialEncoder):
         return code_lengths, inputs, target, target_mask, output_mask
 
     def initialize(self, dataset, stop_points, batch_size, learning_rate, seed,
-                   shuffle=True, collate_fn=None):
+                   shuffle=True, collate_fn=None, encoding_fn=None):
         torch.manual_seed(seed)
         random.seed(seed)
 
@@ -299,8 +301,12 @@ class BlockEncoder(PrequentialEncoder):
         model.to(self.device)
         optim = self._get_optimizer(model, learning_rate)
 
+        # Use provided encoding_fn or fall back to default
+        if encoding_fn is None:
+            encoding_fn = self._get_default_encoding_fn()
+
         state = EncoderState(model=model, optim=optim, beta=None, beta_optim=None,
-                             ema_params=None, trained_params=None)
+                             ema_params=None, trained_params=None, encoding_fn=encoding_fn)
 
         if stop_points[-1] != 1:
             stop_points.append(1)
@@ -314,7 +320,8 @@ class BlockEncoder(PrequentialEncoder):
         return state, train_chunks, chunks, batch_size, shuffle, collate_fn
 
     def step(self, state, batch, encoding_fn=None):
-        encoding_fn = encoding_fn or self.encoding_fn or self._get_default_encoding_fn()
+        # Use encoding_fn from state if not provided
+        encoding_fn = encoding_fn or state.encoding_fn or self._get_default_encoding_fn()
         model = state.model
         optim = state.optim
 
@@ -328,7 +335,8 @@ class BlockEncoder(PrequentialEncoder):
         state.history.append(loss.item())
 
     def eval_code_length(self, state, dataloader, encoding_fn=None):
-        encoding_fn = encoding_fn or self.encoding_fn or self._get_default_encoding_fn()
+        # Use encoding_fn from state if not provided
+        encoding_fn = encoding_fn or state.encoding_fn or self._get_default_encoding_fn()
         model = state.model
         model.eval()
 
@@ -337,7 +345,7 @@ class BlockEncoder(PrequentialEncoder):
             state.code_length += code_lengths.sum().item()
             state.history.append(code_lengths.sum().item())
 
-    def train_until_patience(self, state, train_dataloader, encoding_fn, patience, epochs):
+    def train_until_patience(self, state, train_dataloader, patience, epochs):
         best_loss = float('inf')
         no_improvement = 0
         model = state.model
@@ -346,7 +354,8 @@ class BlockEncoder(PrequentialEncoder):
 
         for epoch in range(epochs):
             for batch in train_dataloader:
-                encoding_fn = encoding_fn or self._get_default_encoding_fn()
+                # Use encoding_fn from parameter or state or fall back to default
+                encoding_fn = state.encoding_fn or self._get_default_encoding_fn()
                 optim.zero_grad()
                 code_lengths, inputs, target, target_mask, output_mask = self.calculate_code_length(model, batch, encoding_fn)
                 loss = code_lengths.sum()
@@ -370,7 +379,7 @@ class MIREncoder(PrequentialEncoder):
 
     def encode(self, dataset, set_name, n_replay_samples, learning_rate=1e-4, batch_size=32,
                seed=42, alpha=0.1, collate_fn=None, use_device_handling=True, use_beta=True,
-               use_ema=True, shuffle=True, num_samples=None, replay_type="buffer"):
+               use_ema=True, shuffle=True, num_samples=None, replay_type="buffer", encoding_fn=None):
         """
         One-shot method to encode the data using the MIR prequential coding method.
 
@@ -394,6 +403,7 @@ class MIREncoder(PrequentialEncoder):
             shuffle: Whether to shuffle the data
             num_samples: Number of samples to use (if None, use all)
             replay_type: Type of replay to use ("buffer" or "streams")
+            encoding_fn: Function to encode the data (if None, will use default)
 
         Returns:
             If return_code_length_history is False:
@@ -418,10 +428,11 @@ class MIREncoder(PrequentialEncoder):
         # Initialize the encoder
         state, replay_loader = self.initialize(
             dataset, batch_size, seed, n_replay_samples, replay_type,
-            None, learning_rate, alpha, collate_fn, shuffle, use_beta, use_ema)
+            None, learning_rate, alpha, collate_fn, shuffle, use_beta, use_ema, encoding_fn)
 
         # Process each batch
         for batch in replay_loader:
+            # Use encoding_fn from state in step method
             self.step(batch, replay_loader, state, alpha)
 
         # Finalize and get results
@@ -430,7 +441,7 @@ class MIREncoder(PrequentialEncoder):
 
     def initialize(self, dataset, batch_size, seed, n_replay_samples, replay_type="buffer",
                    model=None, learning_rate=1e-4, alpha=0.1, collate_fn=None, shuffle=True, use_beta=True,
-                   use_ema=False):
+                   use_ema=False, encoding_fn=None):
         """
         Initializes model, replay loader, optimizer, and state tracking.
         """
@@ -466,11 +477,16 @@ class MIREncoder(PrequentialEncoder):
             ema_params = None
             trained_params = {name: param.clone().detach() for name, param in model.named_parameters()}
 
-        state = EncoderState(model, optim, beta, beta_optim, ema_params, trained_params)
+        # Use provided encoding_fn or fall back to default
+        if encoding_fn is None:
+            encoding_fn = self._get_default_encoding_fn()
+
+        state = EncoderState(model, optim, beta, beta_optim, ema_params, trained_params, encoding_fn=encoding_fn)
         return state, replay_loader
 
     def step(self, batch, replay_loader, state, alpha=0.1):
-        encoding_fn = self.encoding_fn or self._get_default_encoding_fn()
+        # Use encoding_fn from state if available
+        encoding_fn = state.encoding_fn or self._get_default_encoding_fn()
         model = state.model
         beta = state.beta
 
@@ -480,8 +496,7 @@ class MIREncoder(PrequentialEncoder):
             state.beta_optim.zero_grad()
 
         # New batch forward pass
-        code_lengths, inputs, target, target_mask, output_mask = self.calculate_code_length(
-            model, batch, beta, state.ema_params, encoding_fn)
+        code_lengths, inputs, target, target_mask, output_mask = self.calculate_code_length(state, batch)
         loss = code_lengths.sum()
         state.code_length += loss.detach()
         state.history.append(loss.detach())
@@ -499,7 +514,7 @@ class MIREncoder(PrequentialEncoder):
         # Replay training
         for _, replay_batch in replay_loader.sample_replay():
             state.optim.zero_grad()
-            code_lengths, _, _, _, _ = self.calculate_code_length(model, replay_batch, None, None, encoding_fn)
+            code_lengths, _, _, _, _ = self.calculate_code_length(state, replay_batch, False, False)
             loss = code_lengths.sum()
             loss.backward()
             state.optim.step()
@@ -508,33 +523,37 @@ class MIREncoder(PrequentialEncoder):
                     for name, param in model.named_parameters():
                         state.ema_params[name] = state.ema_params[name] * (1 - alpha) + param * alpha
 
-    def calculate_code_length(self, model, batch, beta=None, ema_params=None, encoding_fn=None):
+    def calculate_code_length(self, state, batch, use_ema=True, use_beta=True):
         """
         Calculates the code length for a single batch of data without updating the model.
 
         Args:
-            model: PyTorch model.
+            state: EncoderState containing model, beta, ema_params, and encoding_fn.
             batch: Tuple containing inputs, targets, and optionally masks.
                   The batch can be in one of three formats:
                   1. (inputs, targets)
                   2. (inputs, targets, mask) - shared mask for both inputs and targets
                   3. (inputs, targets, output_mask, target_mask) - separate masks for outputs and targets
-            beta: Optional learnable temperature scalar.
-            ema_params: Optional EMA model parameters.
-            encoding_fn: Optional override of the default encoding function.
+            use_ema: Whether to use EMA parameters for the model (if available).
+            use_beta: Whether to apply beta scaling to the model outputs (if beta is available).
 
         Returns:
             Tuple: (code_lengths, inputs, targets, target_mask, output_mask)
         """
-        encoding_fn = encoding_fn or self.encoding_fn or self._get_default_encoding_fn()
+        # Use encoding_fn from state or fall back to default
+        encoding_fn = state.encoding_fn or self._get_default_encoding_fn()
+        model = state.model
+        beta = state.beta
+        ema_params = state.ema_params
 
         # Optionally swap model weights with EMA weights
         original_params = {}
-        if ema_params is not None:
+        if ema_params is not None and use_ema:
             with torch.no_grad():
                 for name, param in model.named_parameters():
                     original_params[name] = param.clone().detach()
-                    param.data.copy_(ema_params[name].data)
+                    if name in ema_params:
+                        param.data.copy_(ema_params[name].data)
 
         inputs, target = batch[:2]
         inputs = self._move_to_device(inputs)
@@ -562,7 +581,7 @@ class MIREncoder(PrequentialEncoder):
         try:
             # Generate model outputs
             outputs = model(inputs)
-            if beta is not None:
+            if beta is not None and use_beta:
                 outputs = outputs * F.softplus(beta)
 
             # Pass outputs, targets, and masks to encoding_fn
@@ -572,7 +591,8 @@ class MIREncoder(PrequentialEncoder):
             if ema_params is not None:
                 with torch.no_grad():
                     for name, param in model.named_parameters():
-                        param.data.copy_(original_params[name].data)
+                        if name in original_params:
+                            param.data.copy_(original_params[name].data)
 
             inputs = self._move_to_cpu(inputs)
             target = self._move_to_cpu(target)
@@ -586,7 +606,8 @@ class MIREncoder(PrequentialEncoder):
             if ema_params is not None:
                 with torch.no_grad():
                     for name, param in model.named_parameters():
-                        param.data.copy_(original_params[name].data)
+                        if name in original_params:
+                            param.data.copy_(original_params[name].data)
             raise e
 
     def finalize(self, state):
