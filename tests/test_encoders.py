@@ -269,6 +269,9 @@ def main():
     # Test default encoding function
     test_default_encoding_fn()
 
+    # Test custom encoding function passed directly to encode()
+    test_custom_encoding_fn_in_encode()
+
 def test_format1():
     """Test encoders with Format 1: (inputs, targets)"""
     # Define data_path inside the test function
@@ -615,6 +618,96 @@ def test_default_encoding_fn():
     )
 
     print(f"MIR Encoder (Default Encoding) - Code length: {code_length}.")
+
+def test_custom_encoding_fn_in_encode():
+    """Test encoders with custom encoding function passed directly to encode()"""
+    # Define data_path inside the test function
+    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spa_latn_la_broad.tsv")
+    print("\n" + "="*80)
+    print("TESTING CUSTOM ENCODING FUNCTION PASSED TO ENCODE()")
+    print("="*80)
+
+    # Create the dataset
+    dataset = SpanishPhoneticDatasetFormat3(data_path, max_samples=500)
+
+    print(f"Dataset size: {len(dataset)}")
+    print(f"Number of characters: {len(dataset.char_to_idx)}")
+    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
+
+    # Define a custom encoding function with a multiplier to make it different from the default
+    def custom_encoding_fn(outputs, targets, output_mask, target_mask):
+        # Apply masks to outputs and targets
+        masked_outputs = outputs[output_mask]
+        masked_targets = targets[target_mask]
+        # Use a multiplier of 1.5 to make it different from the default
+        return 1.5 * F.cross_entropy(masked_outputs, masked_targets, reduction='none')/torch.log(torch.tensor(2.0, device=outputs.device))
+
+    # Test BlockEncoder with custom encoding function passed to encode()
+    print("\nTesting BlockEncoder with custom encoding function passed to encode()...")
+    model_class = ModelClass(
+        model=SimplePhoneticModel,
+        device='cpu',
+        kwargs={
+            'input_size': len(dataset.char_to_idx),
+            'hidden_size': 64,
+            'output_size': len(dataset.phoneme_to_idx)
+        }
+    )
+    # Note: No loss_fn provided during initialization
+    block_encoder = BlockEncoder(
+        model_class=model_class
+    )
+
+    # Encode with BlockEncoder (one-shot approach) with custom encoding function
+    model, code_length, code_length_history = block_encoder.encode(
+        dataset=dataset,
+        set_name="Spanish Phonetic (Block, Custom Encoding)",
+        epochs=2,
+        learning_rate=0.001,
+        batch_size=32,
+        seed=42,
+        stop_points=[0.5, 1.0],
+        patience=5,
+        collate_fn=collate_fn_format3,
+        use_device_handling=False,
+        encoding_fn=custom_encoding_fn  # Pass custom encoding function here
+    )
+
+    print(f"Block Encoder (Custom Encoding) - Code length: {code_length}.")
+
+    # Test MIREncoder with custom encoding function passed to encode()
+    print("\nTesting MIREncoder with custom encoding function passed to encode()...")
+    model_class = ModelClass(
+        model=SimplePhoneticModel,
+        device='cpu',
+        kwargs={
+            'input_size': len(dataset.char_to_idx),
+            'hidden_size': 64,
+            'output_size': len(dataset.phoneme_to_idx)
+        }
+    )
+    # Note: No loss_fn provided during initialization
+    mir_encoder = MIREncoder(
+        model_class=model_class
+    )
+
+    # Encode with MIREncoder (one-shot approach) with custom encoding function
+    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
+        dataset=dataset,
+        set_name="Spanish Phonetic (MIR, Custom Encoding)",
+        n_replay_samples=2,
+        learning_rate=0.001,
+        batch_size=32,
+        seed=42,
+        alpha=0.1,
+        collate_fn=collate_fn_format3,
+        use_device_handling=False,
+        use_beta=True,
+        use_ema=True,
+        encoding_fn=custom_encoding_fn  # Pass custom encoding function here
+    )
+
+    print(f"MIR Encoder (Custom Encoding) - Code length: {code_length}.")
 
 if __name__ == "__main__":
     main()
