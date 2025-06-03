@@ -496,14 +496,25 @@ class MIREncoder(PrequentialEncoder):
             state.beta_optim.zero_grad()
 
         # New batch forward pass
-        code_lengths, inputs, target, target_mask, output_mask = self.calculate_code_length(state, batch)
+        code_lengths, _, _, _, _ = self.calculate_code_length(state, batch)
         loss = code_lengths.sum()
         state.code_length += loss.detach()
         state.history.append(loss.detach())
         loss.backward()
         if use_beta:
             state.beta_optim.step()
+            state.beta_optim.zero_grad()
+        # If using ema_params or beta, we need to calculate the code_length without either before updating params
+        if use_beta or state.ema_params is not None:
+            state.optim.zero_grad()
+
+            code_lengths, _, _, _, _ = self.calculate_code_length(state, batch, False, False)
+            loss = code_lengths.sum()
+            loss.backward()
         state.optim.step()
+        state.optim.zero_grad()
+        if use_beta:
+            state.beta_optim.zero_grad()
 
         # Update EMA
         if state.ema_params is not None:
