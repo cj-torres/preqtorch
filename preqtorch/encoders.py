@@ -624,8 +624,13 @@ class MIREncoder(PrequentialEncoder):
     def finalize(self, state):
         """Returns final encoding stats after training."""
         if self.device != 'cpu':
-            state.beta.data = state.beta.data.cpu()
-            for name in state.ema_params:
-                state.ema_params[name] = state.ema_params[name].cpu()
+            # Handle beta if it exists
+            if state.beta is not None:
+                state.beta.data = state.beta.data.cpu()
+
+            # Handle ema_params if they exist
+            if state.ema_params is not None:
+                for name in state.ema_params:
+                    state.ema_params[name] = state.ema_params[name].cpu()
 
         return state.model, state.code_length, state.history, state.ema_params, state.beta

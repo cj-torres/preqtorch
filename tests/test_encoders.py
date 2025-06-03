@@ -272,6 +272,11 @@ def main():
     # Test custom encoding function passed directly to encode()
     test_custom_encoding_fn_in_encode()
 
+    # Test MIREncoder with different beta and EMA configurations
+    test_mir_encoder_without_beta()
+    test_mir_encoder_without_ema()
+    test_mir_encoder_without_both()
+
 def test_format1():
     """Test encoders with Format 1: (inputs, targets)"""
     # Define data_path inside the test function
@@ -708,6 +713,150 @@ def test_custom_encoding_fn_in_encode():
     )
 
     print(f"MIR Encoder (Custom Encoding) - Code length: {code_length}.")
+
+def test_mir_encoder_without_beta():
+    """Test MIREncoder without beta (use_beta=False, use_ema=True)"""
+    # Define data_path inside the test function
+    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spa_latn_la_broad.tsv")
+    print("\n" + "="*80)
+    print("TESTING MIR ENCODER WITHOUT BETA (use_beta=False, use_ema=True)")
+    print("="*80)
+
+    # Create the dataset
+    dataset = SpanishPhoneticDatasetFormat3(data_path, max_samples=500)
+
+    print(f"Dataset size: {len(dataset)}")
+    print(f"Number of characters: {len(dataset.char_to_idx)}")
+    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
+
+    # Test MIREncoder without beta
+    print("\nTesting MIREncoder without beta...")
+    model_class = ModelClass(
+        model=SimplePhoneticModel,
+        device='cpu',
+        kwargs={
+            'input_size': len(dataset.char_to_idx),
+            'hidden_size': 64,
+            'output_size': len(dataset.phoneme_to_idx)
+        }
+    )
+    mir_encoder = MIREncoder(
+        model_class=model_class,
+        loss_fn=phonetic_loss_fn
+    )
+
+    # Encode with MIREncoder (one-shot approach) without beta
+    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
+        dataset=dataset,
+        set_name="Spanish Phonetic (MIR, Without Beta)",
+        n_replay_samples=2,
+        learning_rate=0.001,
+        batch_size=32,
+        seed=42,
+        alpha=0.1,
+        collate_fn=collate_fn_format3,
+        use_device_handling=False,
+        use_beta=False,  # Disable beta
+        use_ema=True     # Keep EMA enabled
+    )
+
+    print(f"MIR Encoder (Without Beta) - Code length: {code_length}.")
+
+def test_mir_encoder_without_ema():
+    """Test MIREncoder without EMA (use_beta=True, use_ema=False)"""
+    # Define data_path inside the test function
+    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spa_latn_la_broad.tsv")
+    print("\n" + "="*80)
+    print("TESTING MIR ENCODER WITHOUT EMA (use_beta=True, use_ema=False)")
+    print("="*80)
+
+    # Create the dataset
+    dataset = SpanishPhoneticDatasetFormat3(data_path, max_samples=500)
+
+    print(f"Dataset size: {len(dataset)}")
+    print(f"Number of characters: {len(dataset.char_to_idx)}")
+    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
+
+    # Test MIREncoder without EMA
+    print("\nTesting MIREncoder without EMA...")
+    model_class = ModelClass(
+        model=SimplePhoneticModel,
+        device='cpu',
+        kwargs={
+            'input_size': len(dataset.char_to_idx),
+            'hidden_size': 64,
+            'output_size': len(dataset.phoneme_to_idx)
+        }
+    )
+    mir_encoder = MIREncoder(
+        model_class=model_class,
+        loss_fn=phonetic_loss_fn
+    )
+
+    # Encode with MIREncoder (one-shot approach) without EMA
+    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
+        dataset=dataset,
+        set_name="Spanish Phonetic (MIR, Without EMA)",
+        n_replay_samples=2,
+        learning_rate=0.001,
+        batch_size=32,
+        seed=42,
+        alpha=0.1,
+        collate_fn=collate_fn_format3,
+        use_device_handling=False,
+        use_beta=True,   # Keep beta enabled
+        use_ema=False    # Disable EMA
+    )
+
+    print(f"MIR Encoder (Without EMA) - Code length: {code_length}.")
+
+def test_mir_encoder_without_both():
+    """Test MIREncoder without both beta and EMA (use_beta=False, use_ema=False)"""
+    # Define data_path inside the test function
+    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spa_latn_la_broad.tsv")
+    print("\n" + "="*80)
+    print("TESTING MIR ENCODER WITHOUT BOTH BETA AND EMA (use_beta=False, use_ema=False)")
+    print("="*80)
+
+    # Create the dataset
+    dataset = SpanishPhoneticDatasetFormat3(data_path, max_samples=500)
+
+    print(f"Dataset size: {len(dataset)}")
+    print(f"Number of characters: {len(dataset.char_to_idx)}")
+    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
+
+    # Test MIREncoder without both beta and EMA
+    print("\nTesting MIREncoder without both beta and EMA...")
+    model_class = ModelClass(
+        model=SimplePhoneticModel,
+        device='cpu',
+        kwargs={
+            'input_size': len(dataset.char_to_idx),
+            'hidden_size': 64,
+            'output_size': len(dataset.phoneme_to_idx)
+        }
+    )
+    mir_encoder = MIREncoder(
+        model_class=model_class,
+        loss_fn=phonetic_loss_fn
+    )
+
+    # Encode with MIREncoder (one-shot approach) without both beta and EMA
+    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
+        dataset=dataset,
+        set_name="Spanish Phonetic (MIR, Without Both)",
+        n_replay_samples=2,
+        learning_rate=0.001,
+        batch_size=32,
+        seed=42,
+        alpha=0.1,
+        collate_fn=collate_fn_format3,
+        use_device_handling=False,
+        use_beta=False,  # Disable beta
+        use_ema=False    # Disable EMA
+    )
+
+    print(f"MIR Encoder (Without Both Beta and EMA) - Code length: {code_length}.")
 
 if __name__ == "__main__":
     main()

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "preqtorch"
-version = "0.1.4"
+version = "0.1.5"
 authors = [
   { name="Charles Torres", email="torrescj92@gmail.com" },
 ]
