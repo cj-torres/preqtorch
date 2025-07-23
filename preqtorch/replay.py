@@ -112,7 +112,7 @@ class ReplayBuffer(Replay):
 
 
 class ReplayingDataLoader:
-    def __init__(self, dataset, batch_size, replay: Replay, shuffle=True, collate_fn=None, warn_threshold=1):
+    def __init__(self, dataset, batch_size, replay: Replay, shuffle=True, collate_fn=None, warn_threshold=1, pin_memory=False):
         self.indexed_dataset = IndexedDataset(dataset)
         self.collate_fn = collate_fn or torch.utils.data._utils.collate.default_collate
         self.replay = replay
@@ -123,7 +123,8 @@ class ReplayingDataLoader:
             self.indexed_dataset,
             batch_size=batch_size,
             shuffle=shuffle,
-            collate_fn=_make_indexed_collate_fn(self.collate_fn)
+            collate_fn=_make_indexed_collate_fn(self.collate_fn),
+            pin_memory=pin_memory
         )
         self.iterator = iter(self.loader)
         self.samples_since_replay = 0

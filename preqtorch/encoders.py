@@ -41,7 +41,7 @@ class PrequentialEncoder:
     - Or tuples of tuples including tensors
     """
 
-    def __init__(self, model_class: ModelClass, loss_fn=None, device=None, optimizer_fn=None):
+    def __init__(self, model_class: ModelClass, loss_fn=None, device=None, optimizer_fn=None, pin_memory=False):
         """
         Initialize the encoder.
 
@@ -58,6 +58,7 @@ class PrequentialEncoder:
         if hasattr(self.model_class, 'to'):
             self.model_class.to(self.device)
         self.optimizer_fn = optimizer_fn
+        self.pin_memory = pin_memory
 
     def to(self, device):
         """
@@ -75,7 +76,7 @@ class PrequentialEncoder:
             self.model_class.to(device)
         return self
 
-    def _move_to_device(self, obj):
+    def _move_to_device(self, obj, non_blocking=None):
         """
         Move an object to the device.
 
@@ -86,25 +87,31 @@ class PrequentialEncoder:
 
         Args:
             obj: The object to move to the device
+            non_blocking (bool, optional): If True, use non-blocking transfers
+                when moving tensors. Defaults to the encoder's ``pin_memory``
+                setting.
 
         Returns:
             The object moved to the device
         """
+        if non_blocking is None:
+            non_blocking = self.pin_memory
+
         if isinstance(obj, torch.Tensor):
             # Check if tensor is already on the target device
             if obj.device == self.device or obj.device == torch.device(self.device):
                 return obj
-            return obj.to(self.device)
+            return obj.to(self.device, non_blocking=non_blocking)
         elif isinstance(obj, tuple):
-            return tuple(self._move_to_device(item) for item in obj)
+            return tuple(self._move_to_device(item, non_blocking=non_blocking) for item in obj)
         elif isinstance(obj, list):
-            return [self._move_to_device(item) for item in obj]
+            return [self._move_to_device(item, non_blocking=non_blocking) for item in obj]
         elif isinstance(obj, dict):
-            return {key: self._move_to_device(value) for key, value in obj.items()}
+            return {key: self._move_to_device(value, non_blocking=non_blocking) for key, value in obj.items()}
         else:
             return obj
 
-    def _move_to_cpu(self, obj):
+    def _move_to_cpu(self, obj, non_blocking=None):
         """
         Move an object to CPU if the current device is not CPU.
 
@@ -115,10 +122,16 @@ class PrequentialEncoder:
 
         Args:
             obj: The object to move to CPU
+            non_blocking (bool, optional): If True, use non-blocking transfers
+                when moving tensors. Defaults to the encoder's ``pin_memory``
+                setting.
 
         Returns:
             The object moved to CPU if needed
         """
+        if non_blocking is None:
+            non_blocking = self.pin_memory
+
         # If the encoder is already on CPU, return the object as is
         if self.device == 'cpu' or self.device == torch.device('cpu'):
             return obj
@@ -127,13 +140,13 @@ class PrequentialEncoder:
             # Check if tensor is already on CPU
             if obj.device.type == 'cpu':
                 return obj
-            return obj.cpu()
+            return obj.to('cpu', non_blocking=non_blocking)
         elif isinstance(obj, tuple):
-            return tuple(self._move_to_cpu(item) for item in obj)
+            return tuple(self._move_to_cpu(item, non_blocking=non_blocking) for item in obj)
         elif isinstance(obj, list):
-            return [self._move_to_cpu(item) for item in obj]
+            return [self._move_to_cpu(item, non_blocking=non_blocking) for item in obj]
         elif isinstance(obj, dict):
-            return {key: self._move_to_cpu(value) for key, value in obj.items()}
+            return {key: self._move_to_cpu(value, non_blocking=non_blocking) for key, value in obj.items()}
         else:
             return obj
 
@@ -190,12 +203,12 @@ class BlockEncoder(PrequentialEncoder):
     """
     Prequential encoder using a staged block-wise learning approach.
     """
-    def __init__(self, model_class: ModelClass, loss_fn=None, device=None, optimizer_fn=None):
-        super().__init__(model_class, loss_fn, device, optimizer_fn)
+    def __init__(self, model_class: ModelClass, loss_fn=None, device=None, optimizer_fn=None, pin_memory=False):
+        super().__init__(model_class, loss_fn, device, optimizer_fn, pin_memory)
 
-    def encode(self, dataset, set_name, stop_points, batch_size, seed, 
-               learning_rate=1e-4, epochs=50, patience=20, shuffle=True, 
-               collate_fn=None, use_device_handling=True, num_samples=None, encoding_fn=None):
+    def encode(self, dataset, set_name, stop_points, batch_size, seed,
+               learning_rate=1e-4, epochs=50, patience=20, shuffle=True,
+               collate_fn=None, pin_memory=None, use_device_handling=True, num_samples=None, encoding_fn=None):
         """
         One-shot method to encode the data using the block-wise prequential coding method.
 
@@ -215,6 +228,7 @@ class BlockEncoder(PrequentialEncoder):
             patience: Number of epochs to wait for improvement before early stopping
             shuffle: Whether to shuffle the data
             collate_fn: Function to collate samples into batches
+            pin_memory: Whether dataloaders should use pinned memory
             use_device_handling: Whether to handle device placement in the model
             num_samples: Number of samples to use (if None, use all)
             encoding_fn: Function to encode the data (if None, will use default)
@@ -228,6 +242,11 @@ class BlockEncoder(PrequentialEncoder):
                 code_length: The code length of the encoded data
                 code_length_history: The history of code lengths during training
         """
+        # Determine pin_memory setting
+        if pin_memory is None:
+            pin_memory = self.pin_memory
+        self.pin_memory = pin_memory
+
         # If num_samples is provided, create a subset of the dataset
         if num_samples is not None and num_samples < len(dataset):
             indices = torch.randperm(len(dataset))[:num_samples]
@@ -243,8 +262,10 @@ class BlockEncoder(PrequentialEncoder):
         initial_weights = deepcopy(state.model.state_dict())
 
         for train_set, eval_set in zip(train_chunks, eval_chunks):
-            train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
-            eval_loader = DataLoader(eval_set, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+            train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=shuffle,
+                                     collate_fn=collate_fn, pin_memory=pin_memory)
+            eval_loader = DataLoader(eval_set, batch_size=batch_size, shuffle=False,
+                                    collate_fn=collate_fn, pin_memory=pin_memory)
 
             # Evaluate code length before training
             self.eval_code_length(state, eval_loader, encoding_fn)
@@ -374,11 +395,11 @@ class BlockEncoder(PrequentialEncoder):
 
 
 class MIREncoder(PrequentialEncoder):
-    def __init__(self, model_class, loss_fn=None, device=None, optimizer_fn=None):
-        super().__init__(model_class, loss_fn, device, optimizer_fn)
+    def __init__(self, model_class, loss_fn=None, device=None, optimizer_fn=None, pin_memory=False):
+        super().__init__(model_class, loss_fn, device, optimizer_fn, pin_memory)
 
     def encode(self, dataset, set_name, n_replay_samples, learning_rate=1e-4, batch_size=32,
-               seed=42, alpha=0.1, collate_fn=None, use_device_handling=True, use_beta=True,
+               seed=42, alpha=0.1, collate_fn=None, pin_memory=None, use_device_handling=True, use_beta=True,
                use_ema=True, shuffle=True, num_samples=None, replay_type="buffer", encoding_fn=None):
         """
         One-shot method to encode the data using the MIR prequential coding method.
@@ -397,6 +418,7 @@ class MIREncoder(PrequentialEncoder):
             seed: Random seed for reproducibility
             alpha: EMA update rate
             collate_fn: Function to collate samples into batches
+            pin_memory: Whether dataloaders should use pinned memory
             use_device_handling: Whether to handle device placement in the model
             use_beta: Whether to use learnable temperature parameter
             use_ema: Whether to use exponential moving average
@@ -420,6 +442,10 @@ class MIREncoder(PrequentialEncoder):
                 beta: The learnable temperature parameter
                 replay_streams: The replay streams
         """
+        if pin_memory is None:
+            pin_memory = self.pin_memory
+        self.pin_memory = pin_memory
+
         # If num_samples is provided, create a subset of the dataset
         if num_samples is not None and num_samples < len(dataset):
             indices = torch.randperm(len(dataset))[:num_samples]
@@ -428,7 +454,8 @@ class MIREncoder(PrequentialEncoder):
         # Initialize the encoder
         state, replay_loader = self.initialize(
             dataset, batch_size, seed, n_replay_samples, replay_type,
-            None, learning_rate, alpha, collate_fn, shuffle, use_beta, use_ema, encoding_fn)
+            None, learning_rate, alpha, collate_fn, shuffle, use_beta, use_ema, encoding_fn,
+            pin_memory=pin_memory)
 
         # Process each batch
         for batch in replay_loader:
@@ -441,7 +468,7 @@ class MIREncoder(PrequentialEncoder):
 
     def initialize(self, dataset, batch_size, seed, n_replay_samples, replay_type="buffer",
                    model=None, learning_rate=1e-4, alpha=0.1, collate_fn=None, shuffle=True, use_beta=True,
-                   use_ema=False, encoding_fn=None):
+                   use_ema=False, encoding_fn=None, pin_memory=False):
         """
         Initializes model, replay loader, optimizer, and state tracking.
         """
@@ -468,7 +495,7 @@ class MIREncoder(PrequentialEncoder):
             raise ValueError("replay_type must be 'streams' or 'buffer'")
 
         replay_loader = ReplayingDataLoader(dataset, batch_size=batch_size, replay=replay_impl,
-                                            collate_fn=collate_fn, shuffle=shuffle)
+                                            collate_fn=collate_fn, shuffle=shuffle, pin_memory=pin_memory)
 
         if use_ema:
             ema_params = {name: param.clone().detach() for name, param in model.named_parameters()}

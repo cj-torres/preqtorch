@@ -109,7 +109,7 @@ def test_move_to_device_tensor():
     encoder.to('cuda')
 
     # Move tensor to device
-    cuda_tensor = encoder._move_to_device(cpu_tensor)
+    cuda_tensor = encoder._move_to_device(cpu_tensor, non_blocking=True)
 
     # Check if tensor is on CUDA
     assert cuda_tensor.device.type == 'cuda'
@@ -256,7 +256,7 @@ def test_move_to_cpu_tensor():
     assert cuda_tensor.device.type == 'cuda'
 
     # Move tensor to CPU
-    cpu_tensor = encoder._move_to_cpu(cuda_tensor)
+    cpu_tensor = encoder._move_to_cpu(cuda_tensor, non_blocking=True)
 
     # Check if tensor is on CPU
     assert cpu_tensor.device.type == 'cpu'
