@@ -3,6 +3,9 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from copy import deepcopy
 import os, random
+import math
+
+LOG2 = math.log(2)
 from .utils import ModelClass
 from .replay import ReplayStreams, ReplayBuffer, Replay, ReplayingDataLoader
 
@@ -146,7 +149,8 @@ class PrequentialEncoder:
         and applies the masks before computing the loss.
         """
         def encoding_fn(outputs, targets, output_mask, target_mask):
-            return torch.nn.functional.cross_entropy(outputs[output_mask], targets[target_mask], reduction='none')/torch.log(torch.tensor(2.0, device=outputs.device))
+            log2 = torch.tensor(LOG2, device=outputs.device)
+            return torch.nn.functional.cross_entropy(outputs[output_mask], targets[target_mask], reduction='none') / log2
         return encoding_fn
 
     def _get_optimizer(self, model, learning_rate):
