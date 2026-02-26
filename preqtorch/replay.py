@@ -5,6 +5,17 @@ from copy import deepcopy
 import os, random
 import warnings
 
+
+def _materialize_batch(dataset, sampled_idx, collate_fn):
+    """Materialize a replay batch, using fast-path tensor indexing when available."""
+    default_collate = torch.utils.data._utils.collate.default_collate
+    if collate_fn is default_collate and isinstance(dataset, torch.utils.data.TensorDataset):
+        index_tensor = torch.as_tensor(sampled_idx, dtype=torch.long)
+        return tuple(tensor.index_select(0, index_tensor.to(tensor.device)) for tensor in dataset.tensors)
+
+    samples = [dataset[j] for j in sampled_idx]
+    return collate_fn(samples)
+
 def _make_indexed_collate_fn(base_collate_fn):
     '''
     Helper function which creates a collate function to work with the indexed dataset.
@@ -70,8 +81,7 @@ class ReplayStreams(Replay):
 
             # We already know the exact indices and batch size, so we can directly index
             # and apply the collate function without needing a DataLoader
-            samples = [self.dataset[j] for j in sampled_idx]
-            batch = self.collate_fn(samples)
+            batch = _materialize_batch(self.dataset, sampled_idx, self.collate_fn)
             sampled_batches.append((sampled_idx, batch))
 
         self.t += 1
@@ -105,8 +115,7 @@ class ReplayBuffer(Replay):
         sampled_batches = []
         for _ in range(self.n_samples):
             sampled_idx = random.sample(self.seen_indices, self.batch_size)
-            samples = [self.dataset[j] for j in sampled_idx]
-            batch = self.collate_fn(samples)
+            batch = _materialize_batch(self.dataset, sampled_idx, self.collate_fn)
             sampled_batches.append((sampled_idx, batch))
         return sampled_batches
 

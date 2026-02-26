@@ -1,9 +1,9 @@
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
-from copy import deepcopy
 import os, random
 import math
+from torch.func import functional_call
 
 LOG2 = math.log(2)
 from .utils import ModelClass
@@ -62,6 +62,7 @@ class PrequentialEncoder:
             self.model_class.to(self.device)
         self.optimizer_fn = optimizer_fn
         self.pin_memory = pin_memory
+        self._default_mask_cache = {}
 
     def to(self, device):
         """
@@ -189,6 +190,15 @@ class PrequentialEncoder:
         model = self.model_class.initialize()
         return model
 
+    def _get_default_mask(self, tensor):
+        """Return a cached bool mask of ones for the given tensor shape/device."""
+        key = (tuple(tensor.shape), tensor.device, torch.bool)
+        mask = self._default_mask_cache.get(key)
+        if mask is None or (not torch.is_inference_mode_enabled() and mask.is_inference()):
+            mask = torch.ones_like(tensor, dtype=torch.bool, device=tensor.device)
+            self._default_mask_cache[key] = mask
+        return mask
+
     def encode(self, *args, **kwargs):
         """
         Encode the data using the prequential coding method.
@@ -263,7 +273,7 @@ class BlockEncoder(PrequentialEncoder):
         # Use encoding_fn from state
         encoding_fn = state.encoding_fn
 
-        initial_weights = deepcopy(state.model.state_dict())
+        initial_weights = {name: value.detach().clone() for name, value in state.model.state_dict().items()}
 
         for train_set, eval_set in zip(train_chunks, eval_chunks):
             train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=shuffle,
@@ -277,7 +287,7 @@ class BlockEncoder(PrequentialEncoder):
             if train_set == train_chunks[-1]:
                 break
 
-            state.model.load_state_dict(deepcopy(initial_weights))
+            state.model.load_state_dict(initial_weights)
             self.train_until_patience(state, train_loader, patience, epochs)
 
         print(f"Performance for {set_name}: Prequential code length: {state.code_length}")
@@ -298,8 +308,8 @@ class BlockEncoder(PrequentialEncoder):
 
         if len(batch) <= 2 or batch[2] is None:
             # Case 1: No masks provided, create default masks
-            output_mask = torch.ones_like(inputs, dtype=torch.bool, device=self.device)
-            target_mask = torch.ones_like(target, dtype=torch.bool, device=self.device)
+            output_mask = self._get_default_mask(inputs)
+            target_mask = self._get_default_mask(target)
         elif len(batch) == 3:
             # Case 2: One mask provided, use it for both output and target
             shared_mask = self._move_to_device(batch[2])
@@ -307,8 +317,8 @@ class BlockEncoder(PrequentialEncoder):
             target_mask = shared_mask
         else:
             # Case 3: Two masks provided, use them separately
-            output_mask = self._move_to_device(batch[2]) if batch[2] is not None else torch.ones_like(inputs, dtype=torch.bool, device=self.device)
-            target_mask = self._move_to_device(batch[3]) if batch[3] is not None else torch.ones_like(target, dtype=torch.bool, device=self.device)
+            output_mask = self._move_to_device(batch[2]) if batch[2] is not None else self._get_default_mask(inputs)
+            target_mask = self._move_to_device(batch[3]) if batch[3] is not None else self._get_default_mask(target)
 
         # Generate model outputs
         outputs = model(inputs)
@@ -365,10 +375,11 @@ class BlockEncoder(PrequentialEncoder):
         model = state.model
         model.eval()
 
-        for batch in dataloader:
-            code_lengths, inputs, target, target_mask, output_mask = self.calculate_code_length(model, batch, encoding_fn)
-            state.code_length += code_lengths.sum().item()
-            state.history.append(code_lengths.sum().item())
+        with torch.inference_mode():
+            for batch in dataloader:
+                code_lengths, _, _, _, _ = self.calculate_code_length(model, batch, encoding_fn)
+                state.code_length += code_lengths.sum().item()
+                state.history.append(code_lengths.sum().item())
 
     def train_until_patience(self, state, train_dataloader, patience, epochs):
         best_loss = float('inf')
@@ -531,8 +542,8 @@ class MIREncoder(PrequentialEncoder):
         loss = code_lengths.sum()
         state.code_length += loss.detach()
         state.history.append(loss.detach())
-        loss.backward()
         if use_beta:
+            loss.backward()
             state.beta_optim.step()
             state.beta_optim.zero_grad()
         # If using ema_params or beta, we need to calculate the code_length without either before updating params
@@ -588,15 +599,6 @@ class MIREncoder(PrequentialEncoder):
         beta = state.beta
         ema_params = state.ema_params
 
-        # Optionally swap model weights with EMA weights
-        original_params = {}
-        if ema_params is not None and use_ema:
-            with torch.no_grad():
-                for name, param in model.named_parameters():
-                    original_params[name] = param.clone().detach()
-                    if name in ema_params:
-                        param.data.copy_(ema_params[name].data)
-
         inputs, target = batch[:2]
         inputs = self._move_to_device(inputs)
         target = self._move_to_device(target)
@@ -608,8 +610,8 @@ class MIREncoder(PrequentialEncoder):
 
         if len(batch) <= 2 or batch[2] is None:
             # Case 1: No masks provided, create default masks
-            output_mask = torch.ones_like(inputs, dtype=torch.bool, device=self.device)
-            target_mask = torch.ones_like(target, dtype=torch.bool, device=self.device)
+            output_mask = self._get_default_mask(inputs)
+            target_mask = self._get_default_mask(target)
         elif len(batch) == 3:
             # Case 2: One mask provided, use it for both output and target
             shared_mask = self._move_to_device(batch[2])
@@ -617,40 +619,24 @@ class MIREncoder(PrequentialEncoder):
             target_mask = shared_mask
         else:
             # Case 3: Two masks provided, use them separately
-            output_mask = self._move_to_device(batch[2]) if batch[2] is not None else torch.ones_like(inputs, dtype=torch.bool, device=self.device)
-            target_mask = self._move_to_device(batch[3]) if batch[3] is not None else torch.ones_like(target, dtype=torch.bool, device=self.device)
+            output_mask = self._move_to_device(batch[2]) if batch[2] is not None else self._get_default_mask(inputs)
+            target_mask = self._move_to_device(batch[3]) if batch[3] is not None else self._get_default_mask(target)
 
-        try:
-            # Generate model outputs
+        if ema_params is not None and use_ema:
+            params_and_buffers = {name: buffer for name, buffer in model.named_buffers()}
+            params_and_buffers.update({name: param for name, param in model.named_parameters()})
+            params_and_buffers.update({name: value for name, value in ema_params.items() if name in params_and_buffers})
+            outputs = functional_call(model, params_and_buffers, (inputs,))
+        else:
             outputs = model(inputs)
-            if beta is not None and use_beta:
-                outputs = outputs * F.softplus(beta)
 
-            # Pass outputs, targets, and masks to encoding_fn
-            code_lengths = encoding_fn(outputs, target, output_mask, target_mask)
+        if beta is not None and use_beta:
+            outputs = outputs * F.softplus(beta)
 
-            # Restore original weights if EMA was used
-            if ema_params is not None:
-                with torch.no_grad():
-                    for name, param in model.named_parameters():
-                        if name in original_params:
-                            param.data.copy_(original_params[name].data)
+        # Pass outputs, targets, and masks to encoding_fn
+        code_lengths = encoding_fn(outputs, target, output_mask, target_mask)
 
-            inputs = self._move_to_cpu(inputs)
-            target = self._move_to_cpu(target)
-            target_mask = self._move_to_cpu(target_mask)
-            output_mask = self._move_to_cpu(output_mask)
-
-            return code_lengths, inputs, target, target_mask, output_mask
-
-        except Exception as e:
-            # Restore original weights in case of failure
-            if ema_params is not None:
-                with torch.no_grad():
-                    for name, param in model.named_parameters():
-                        if name in original_params:
-                            param.data.copy_(original_params[name].data)
-            raise e
+        return code_lengths, inputs, target, target_mask, output_mask
 
     def finalize(self, state):
         """Returns final encoding stats after training."""
