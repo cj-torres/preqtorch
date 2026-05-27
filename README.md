@@ -1,13 +1,16 @@
 # PreqTorch
 
-A PyTorch-based library for calculating the prequential codelength of datasets. This toolkit allows for calculating the stochastic complexity of a dataset given it and a model class.
+A PyTorch-based library for calculating the prequential codelength of datasets. This toolkit allows for calculating the stochastic complexity of a dataset given a dataset and model class.
 
 ## Overview
 
 PreqTorch provides tools for prequential encoding in PyTorch. Prequential encoding is a technique for evaluating datasets in an online learning setting, where the model is updated after each prediction.
 
 The library includes:
-- Prequential encoders (BlockEncoder, MIREncoder)
+- Prequential encoders (`BlockEncoder`, `MIREncoder`)
+- Model wrapper (`ModelClass`) for explicit initialization/device behavior
+- Structured return object (`EncoderResult`) with named fields
+- Canonical batch object (`PrequentialBatch`), dataset (`PrequentialDataset`), and prequential-native loader (`PrequentialDataLoader`)
 
 ## Installation
 
@@ -32,110 +35,76 @@ PreqTorch has the following requirements:
 - PyTorch 1.7+
 - NumPy
 
+## Usage
 
-# Usage
+PreqTorch is designed around the idea that **model initialization is part of the model definition**. You pass a `ModelClass` wrapper that can sample freshly initialized models during encoding.
 
-I built this package to stop myself from rewriting the same prequential encoding process over and over. For this reason, the package wraps your dataset, model, and if necessary, a collate function and encoding (loss) function.
+You may provide custom:
+- dataset format
+- `collate_fn`
+- encoding function (`encoding_fn`)
 
-The rest of the document will review the required formats for each of these. In my first iteration I've tried to strike a balance between flexibility and brevity.
+directly to `encode(...)`, with the user owning dataloader construction.
 
 ### Dataset formatting
 
-For PreqTorch to work properly, your datasets must:
 
-1. Be organized as tuples of tensors or tuples of tuples including tensors
-2. Return data in one of the following formats:
-   - `(inputs, targets)` - Basic format without masks
-   - `(inputs, targets, mask)` - Format with a shared mask for both model outputs and targets
-   - `(inputs, targets, output_mask, target_mask)` - Format with separate masks for outputs and targets
-3. Be compatible with PyTorch's Dataset class
+### PrequentialDataLoader
 
-### Collate Function
+`PrequentialDataset` and `PrequentialDataLoader` follow PyTorch conventions: dataset owns indexing logic; dataloader owns batching/shuffling/iteration.
 
-When using PreqTorch encoders, you may provide your own collate function at creation time. This function should:
-
-- Take a batch of samples and combine them into a single batch
-- Return data in one of the supported formats:
-  - `(inputs, targets)`
-  - `(inputs, targets, mask)` - shared mask for both model outputs and targets
-  - `(inputs, targets, output_mask, target_mask)` - separate masks for outputs and targets
-- Handle any specific requirements of your dataset
-
-Examples of collate functions for different dataset formats:
+It accepts indexable sources at initialization and requires keyword arguments `inputs` and `targets`. Optional `masks` and `target_masks` are also supported.
 
 ```python
-# Basic collate function (inputs, targets)
-def basic_collate_fn(batch):
-    # Unpack the batch
-    inputs = [item[0] for item in batch]
-    targets = [item[1] for item in batch]
+from preqtorch import PrequentialDataset, PrequentialDataLoader
 
-    # Stack inputs and targets into tensors
-    inputs = torch.stack(inputs)
-    targets = torch.stack(targets)
+dataset = PrequentialDataset(
+    inputs=my_inputs,
+    targets=my_targets,
+    masks=my_output_masks,          # optional
+    target_masks=my_target_masks,   # optional
+)
 
-    return inputs, targets
-
-# Collate function with shared mask (inputs, targets, mask)
-def masked_collate_fn(batch):
-    # Unpack the batch
-    inputs = [item[0] for item in batch]
-    targets = [item[1] for item in batch]
-
-    # Create or extract masks (example: mask based on non-zero values)
-    masks = [torch.ones_like(item[1], dtype=torch.bool) for item in batch]
-
-    # Stack inputs, targets, and masks into tensors
-    inputs = torch.stack(inputs)
-    targets = torch.stack(targets)
-    masks = torch.stack(masks)
-
-    return inputs, targets, masks
-
-# Collate function with separate masks (inputs, targets, output_mask, target_mask)
-def separate_masks_collate_fn(batch):
-    # Unpack the batch
-    inputs = [item[0] for item in batch]
-    targets = [item[1] for item in batch]
-
-    # Create or extract masks (example: different masks for outputs and targets)
-    # Note: output_mask will be applied to model outputs, which should have the same shape as inputs
-    output_masks = [torch.ones_like(item[0], dtype=torch.bool) for item in batch]
-    target_masks = [torch.ones_like(item[1], dtype=torch.bool) for item in batch]
-
-    # Stack inputs, targets, and masks into tensors
-    inputs = torch.stack(inputs)
-    targets = torch.stack(targets)
-    output_masks = torch.stack(output_masks)
-    target_masks = torch.stack(target_masks)
-
-    return inputs, targets, output_masks, target_masks
+loader = PrequentialDataLoader(
+    inputs=my_inputs,
+    targets=my_targets,
+    masks=my_output_masks,
+    target_masks=my_target_masks,
+    shuffle=True,
+)
 ```
 
-### Encoding Function
+The loader validates that indexable sources line up in length and that indexed values are tensors (or tuples of tensors), then yields canonical `PrequentialBatch` objects.
 
-By default encoders will attempt to use cross entropy loss, returning code lengths calculated from the loss in units of bits. However, a custom encoding function may be supplied. No matter what function is supplied, it will be called like this:
+
+> Note: The library now uses a canonical `PrequentialBatch` internally. If you do not pass a custom `collate_fn`, encoders default to `prequential_collate`.
+
+For PreqTorch to work properly, datasets should return one of these formats:
+
+1. `(inputs, targets)`
+2. `(inputs, targets, mask)` where the mask is shared between outputs and targets
+3. `(inputs, targets, output_mask, target_mask)`
+
+These formats can come directly from your dataset, or from your custom collate function.
+
+### Collate function
+
+When using PreqTorch encoders, your `collate_fn` should combine a list of samples into one of the supported batch formats above.
+
+### Encoding function contract
+
+By default, encoders use a cross-entropy based code-length function (in bits). You can supply a custom one. It will be called as:
 
 ```python
-code_lengths = encoding_fn(outputs, target, output_mask, target_mask)
+code_lengths = encoding_fn(outputs, targets, output_mask, target_mask)
 ```
 
-You can write the function however you wish! But understand that this is the call that will be made internally.
-
-
-## Encoders
-
-The package supports two types of prequential encoders, themselves approximations of true prequential encoding (which is unwieldy).
-
-### Block Encoding
-
-Block encoding divides the dataset into blocks and trains the model on each block sequentially. See Blier, et al. (2018) for details.
+### Block encoding
 
 ```python
 import torch
-from preqtorch import BlockEncoder
+from preqtorch import BlockEncoder, ModelClass
 
-# Define a model class
 class MyModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -144,53 +113,52 @@ class MyModel(torch.nn.Module):
     def forward(self, x):
         return self.linear(x)
 
-# Create a block encoder
-encoder = BlockEncoder(
-    model_class=MyModel,
-    loss_fn=torch.nn.functional.cross_entropy
-)
+model_class = ModelClass(MyModel, device="cpu")
+encoder = BlockEncoder(model_class=model_class)
 
-# Encode a dataset using block encoding
-model, code_length, history = encoder.encode(
-    dataset=my_dataset,
+result = encoder.encode(
+    train_dataloader=[train_loader_1, train_loader_2],
+    eval_dataloaders=[eval_loader_1, eval_loader_2],
     set_name="My Dataset",
-    stop_points=[0.125, 0.25, 0.5, 1.0],  # Points (in proportion) to stop and evaluate
-    batch_size=32,
     seed=42,
     learning_rate=0.001,
     epochs=50,
     patience=20,
-    collate_fn=my_collate_fn  # Your custom collate function
+    collate_fn=my_collate_fn,
 )
+
+# Named access
+print(result.code_length)
+
+# Access fields
+model, code_length, history = result.model, result.code_length, result.history
 ```
 
-### MIR Encoding
-
-MIR (Mini-batch Incremental/Replay) encoding uses replay buffers or streams to revisit previous data. See Bornschein, et al. (2022) for details.
+### MIR encoding
 
 ```python
 from preqtorch import MIREncoder
 
-# Create a MIR encoder
-encoder = MIREncoder(
-    model_class=MyModel,
-    loss_fn=torch.nn.functional.cross_entropy
+encoder = MIREncoder(model_class=model_class)
+
+result = encoder.encode(
+    dataloader=my_loader,
+    set_name="My Dataset",
+    n_replay_samples=2,
+    learning_rate=0.001,
+    seed=42,
+    alpha=0.1,
+    collate_fn=my_collate_fn,
+    use_beta=True,
+    use_ema=True,
+    replay_type="buffer",
 )
 
-# Encode a dataset using MIR encoding
-model, code_length, history, ema_params, beta, replay = encoder.encode(
-    dataset=my_dataset,
-    set_name="My Dataset",
-    n_replay_samples=2,  # Number of replay streams or buffer size
-    learning_rate=0.001,
-    batch_size=32,
-    seed=42,
-    alpha=0.1,  # EMA update rate
-    collate_fn=my_collate_fn,  # Your custom collate function
-    use_beta=True,  # Whether to use learnable temperature parameter
-    use_ema=True,  # Whether to use exponential moving average
-    replay_type="buffer"  # Type of replay: "buffer" or "streams"
-)
+# Named access
+print(result.beta, result.replay)
+
+# Access fields
+model, code_length, history, ema_params, beta, replay = result.model, result.code_length, result.history, result.ema_params, result.beta, result.replay
 ```
 
 ## License

@@ -1,3 +1,31 @@
+
+
+def test_preq_loader_from_indexables():
+    xs = [torch.randn(4) for _ in range(5)]
+    ys = [torch.tensor(i % 2) for i in range(5)]
+    ms = [torch.tensor(True) for _ in range(5)]
+
+    loader = PrequentialDataLoader(inputs=xs, targets=ys, masks=ms, batch_size=2, shuffle=False)
+    batch = next(iter(loader))
+
+    assert hasattr(batch, "inputs")
+    assert hasattr(batch, "targets")
+    assert hasattr(batch, "output_mask")
+    assert hasattr(batch, "target_mask")
+
+
+
+
+
+def test_encoder_result_fields():
+    r = EncoderResult(model='m', code_length=1.0, history=[1,2,3])
+    assert r.model == 'm'
+    assert r.code_length == 1.0
+    assert r.history == [1,2,3]
+
+    r2 = EncoderResult(model='m', code_length=1.0, history=[], ema_params={}, beta='b', replay='r')
+    assert r2.replay == 'r'
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,7 +33,7 @@ import os
 from torch.utils.data import Dataset, DataLoader
 
 # Import directly from the package
-from preqtorch import BlockEncoder, MIREncoder, ModelClass
+from preqtorch import BlockEncoder, MIREncoder, ModelClass, EncoderResult, PrequentialDataLoader, PrequentialDataset
 
 # Define a simple character-level model for the Spanish phonetic transcription task
 class SimplePhoneticModel(nn.Module):
@@ -102,31 +130,28 @@ class BaseSpanishPhoneticDataset(Dataset):
 
         return word_tensor, phoneme_tensor
 
-# Dataset that returns (inputs, targets) - Format 1
-class SpanishPhoneticDatasetFormat1(BaseSpanishPhoneticDataset):
-    def __getitem__(self, idx):
-        word_tensor, phoneme_tensor = self._get_tensors(idx)
-        return word_tensor, phoneme_tensor
+# Dataset builders backed by PrequentialDataset
+def build_spanish_dataset_format1(base_dataset):
+    inputs, targets = zip(*[base_dataset._get_tensors(i) for i in range(len(base_dataset))])
+    return PrequentialDataset(inputs=inputs, targets=targets)
 
-# Dataset that returns (inputs, targets, mask) - Format 2
-class SpanishPhoneticDatasetFormat2(BaseSpanishPhoneticDataset):
-    def __getitem__(self, idx):
-        word_tensor, phoneme_tensor = self._get_tensors(idx)
-        # Create a mask for the target (all True in this case)
-        mask = torch.ones_like(phoneme_tensor, dtype=torch.bool)
-        return word_tensor, phoneme_tensor, mask
 
-# Dataset that returns (inputs, targets, input_mask, target_mask) - Format 3
-class SpanishPhoneticDatasetFormat3(BaseSpanishPhoneticDataset):
-    def __getitem__(self, idx):
-        word_tensor, phoneme_tensor = self._get_tensors(idx)
-        # Create masks for both input and target (all True in this case)
-        output_mask = torch.ones_like(phoneme_tensor, dtype=torch.bool)
-        target_mask = torch.ones_like(phoneme_tensor, dtype=torch.bool)
-        return word_tensor, phoneme_tensor, output_mask, target_mask
+def build_spanish_dataset_format2(base_dataset):
+    samples = [base_dataset._get_tensors(i) for i in range(len(base_dataset))]
+    inputs, targets = zip(*samples)
+    masks = [torch.ones_like(t, dtype=torch.bool) for t in targets]
+    return PrequentialDataset(inputs=inputs, targets=targets, masks=masks)
+
+
+def build_spanish_dataset_format3(base_dataset):
+    samples = [base_dataset._get_tensors(i) for i in range(len(base_dataset))]
+    inputs, targets = zip(*samples)
+    output_masks = [torch.ones_like(t, dtype=torch.bool) for t in targets]
+    target_masks = [torch.ones_like(t, dtype=torch.bool) for t in targets]
+    return PrequentialDataset(inputs=inputs, targets=targets, masks=output_masks, target_masks=target_masks)
 
 # For backward compatibility
-SpanishPhoneticDataset = SpanishPhoneticDatasetFormat2
+SpanishPhoneticDataset = build_spanish_dataset_format2
 
 # Collate function for Format 1: (inputs, targets)
 def collate_fn_format1(batch):
@@ -286,11 +311,12 @@ def test_format1():
     print("="*80)
 
     # Create the dataset
-    dataset = SpanishPhoneticDatasetFormat1(data_path, max_samples=500)
+    base_dataset = BaseSpanishPhoneticDataset(data_path, max_samples=500)
+    dataset = build_spanish_dataset_format1(base_dataset)
 
     print(f"Dataset size: {len(dataset)}")
-    print(f"Number of characters: {len(dataset.char_to_idx)}")
-    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
+    print(f"Number of characters: {len(base_dataset.char_to_idx)}")
+    print(f"Number of phonemes: {len(base_dataset.phoneme_to_idx)}")
 
     # Test BlockEncoder
     print("\nTesting BlockEncoder with Format 1...")
@@ -298,30 +324,30 @@ def test_format1():
         model=SimplePhoneticModel,
         device='cpu',
         kwargs={
-            'input_size': len(dataset.char_to_idx),
+            'input_size': len(base_dataset.char_to_idx),
             'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
+            'output_size': len(base_dataset.phoneme_to_idx)
         }
     )
     block_encoder = BlockEncoder(
         model_class=model_class,
-        loss_fn=phonetic_loss_fn
     )
 
     # Encode with BlockEncoder (one-shot approach)
-    model, code_length, code_length_history = block_encoder.encode(
-        dataset=dataset,
+    loader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=collate_fn_format1)
+    result = block_encoder.encode(
+        train_dataloader=[loader],
+        eval_dataloaders=[loader],
         set_name="Spanish Phonetic (Block, Format 1)",
         epochs=2,
         learning_rate=0.001,
-        batch_size=32,
         seed=42,
-        stop_points=[0.5, 1.0],
         patience=5,
         collate_fn=collate_fn_format1,
         use_device_handling=False
     )
 
+    model, code_length, code_length_history = result.model, result.code_length, result.history
     print(f"Block Encoder (Format 1) - Code length: {code_length}.")
 
     # Test MIREncoder
@@ -330,23 +356,21 @@ def test_format1():
         model=SimplePhoneticModel,
         device='cpu',
         kwargs={
-            'input_size': len(dataset.char_to_idx),
+            'input_size': len(base_dataset.char_to_idx),
             'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
+            'output_size': len(base_dataset.phoneme_to_idx)
         }
     )
     mir_encoder = MIREncoder(
         model_class=model_class,
-        loss_fn=phonetic_loss_fn
     )
 
     # Encode with MIREncoder (one-shot approach)
-    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
-        dataset=dataset,
+    result = mir_encoder.encode(
+        dataloader=loader,
         set_name="Spanish Phonetic (MIR, Format 1)",
         n_replay_samples=2,
         learning_rate=0.001,
-        batch_size=32,
         seed=42,
         alpha=0.1,
         collate_fn=collate_fn_format1,
@@ -355,6 +379,8 @@ def test_format1():
         use_ema=True
     )
 
+    model, code_length, code_length_history = result.model, result.code_length, result.history
+    ema_params, beta, replay_streams = result.ema_params, result.beta, result.replay
     print(f"MIR Encoder (Format 1) - Code length: {code_length}.")
 
 def test_format2():
@@ -366,11 +392,12 @@ def test_format2():
     print("="*80)
 
     # Create the dataset
-    dataset = SpanishPhoneticDatasetFormat2(data_path, max_samples=500)
+    base_dataset = BaseSpanishPhoneticDataset(data_path, max_samples=500)
+    dataset = build_spanish_dataset_format2(base_dataset)
 
     print(f"Dataset size: {len(dataset)}")
-    print(f"Number of characters: {len(dataset.char_to_idx)}")
-    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
+    print(f"Number of characters: {len(base_dataset.char_to_idx)}")
+    print(f"Number of phonemes: {len(base_dataset.phoneme_to_idx)}")
 
     # Test BlockEncoder
     print("\nTesting BlockEncoder with Format 2...")
@@ -378,57 +405,31 @@ def test_format2():
         model=SimplePhoneticModel,
         device='cpu',
         kwargs={
-            'input_size': len(dataset.char_to_idx),
+            'input_size': len(base_dataset.char_to_idx),
             'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
+            'output_size': len(base_dataset.phoneme_to_idx)
         }
     )
     block_encoder = BlockEncoder(
         model_class=model_class,
-        loss_fn=phonetic_loss_fn
     )
-
-    # Test staged approach (initialize, step, finalize)
-    print("\nTesting BlockEncoder with staged approach (initialize, step, finalize)...")
-    # Initialize
-    state, train_chunks, eval_chunks, batch_size, shuffle, collate_fn_result = block_encoder.initialize(
-        dataset=dataset,
-        stop_points=[0.5, 1.0],
-        batch_size=32,
-        learning_rate=0.001,
-        seed=42,
-        shuffle=True,
-        collate_fn=collate_fn_format2
-    )
-
-    # Create dataloader for the first chunk
-    train_loader = DataLoader(train_chunks[0], batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn_format2)
-
-    # Step through batches
-    for batch in train_loader:
-        block_encoder.step(state, batch)
-
-    # Evaluate on the first chunk
-    eval_loader = DataLoader(eval_chunks[0], batch_size=batch_size, shuffle=False, collate_fn=collate_fn_format2)
-    block_encoder.eval_code_length(state, eval_loader)
-
-    print(f"Block Encoder (staged approach, Format 2) - Code length: {state.code_length}.")
 
     # Encode with BlockEncoder (one-shot approach)
-    model, code_length, code_length_history = block_encoder.encode(
-        dataset=dataset,
+    loader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=collate_fn_format1)
+    result = block_encoder.encode(
+        train_dataloader=[loader],
+        eval_dataloaders=[loader],
         set_name="Spanish Phonetic (Block, Format 2)",
         epochs=2,
         learning_rate=0.001,
-        batch_size=32,
         seed=42,
-        stop_points=[0.5, 1.0],
         patience=5,
         collate_fn=collate_fn_format2,
         use_device_handling=False,
 
     )
 
+    model, code_length, code_length_history = result.model, result.code_length, result.history
     print(f"Block Encoder (Format 2) - Code length: {code_length}.")
 
     # Test MIREncoder
@@ -437,23 +438,21 @@ def test_format2():
         model=SimplePhoneticModel,
         device='cpu',
         kwargs={
-            'input_size': len(dataset.char_to_idx),
+            'input_size': len(base_dataset.char_to_idx),
             'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
+            'output_size': len(base_dataset.phoneme_to_idx)
         }
     )
     mir_encoder = MIREncoder(
         model_class=model_class,
-        loss_fn=phonetic_loss_fn
     )
 
     # Encode with MIREncoder (one-shot approach)
-    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
-        dataset=dataset,
+    result = mir_encoder.encode(
+        dataloader=loader,
         set_name="Spanish Phonetic (MIR, Format 2)",
         n_replay_samples=2,
         learning_rate=0.001,
-        batch_size=32,
         seed=42,
         alpha=0.1,
         collate_fn=collate_fn_format2,
@@ -462,6 +461,8 @@ def test_format2():
         use_ema=True
     )
 
+    model, code_length, code_length_history = result.model, result.code_length, result.history
+    ema_params, beta, replay_streams = result.ema_params, result.beta, result.replay
     print(f"MIR Encoder (Format 2) - Code length: {code_length}.")
 
 def test_format3():
@@ -473,11 +474,12 @@ def test_format3():
     print("="*80)
 
     # Create the dataset
-    dataset = SpanishPhoneticDatasetFormat3(data_path, max_samples=500)
+    base_dataset = BaseSpanishPhoneticDataset(data_path, max_samples=500)
+    dataset = build_spanish_dataset_format3(base_dataset)
 
     print(f"Dataset size: {len(dataset)}")
-    print(f"Number of characters: {len(dataset.char_to_idx)}")
-    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
+    print(f"Number of characters: {len(base_dataset.char_to_idx)}")
+    print(f"Number of phonemes: {len(base_dataset.phoneme_to_idx)}")
 
     # Test BlockEncoder
     print("\nTesting BlockEncoder with Format 3...")
@@ -485,30 +487,30 @@ def test_format3():
         model=SimplePhoneticModel,
         device='cpu',
         kwargs={
-            'input_size': len(dataset.char_to_idx),
+            'input_size': len(base_dataset.char_to_idx),
             'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
+            'output_size': len(base_dataset.phoneme_to_idx)
         }
     )
     block_encoder = BlockEncoder(
         model_class=model_class,
-        loss_fn=phonetic_loss_fn
     )
 
     # Encode with BlockEncoder (one-shot approach)
-    model, code_length, code_length_history = block_encoder.encode(
-        dataset=dataset,
+    loader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=collate_fn_format1)
+    result = block_encoder.encode(
+        train_dataloader=[loader],
+        eval_dataloaders=[loader],
         set_name="Spanish Phonetic (Block, Format 3)",
         epochs=2,
         learning_rate=0.001,
-        batch_size=32,
         seed=42,
-        stop_points=[0.5, 1.0],
         patience=5,
         collate_fn=collate_fn_format3,
         use_device_handling=False
     )
 
+    model, code_length, code_length_history = result.model, result.code_length, result.history
     print(f"Block Encoder (Format 3) - Code length: {code_length}.")
 
     # Test MIREncoder
@@ -517,23 +519,21 @@ def test_format3():
         model=SimplePhoneticModel,
         device='cpu',
         kwargs={
-            'input_size': len(dataset.char_to_idx),
+            'input_size': len(base_dataset.char_to_idx),
             'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
+            'output_size': len(base_dataset.phoneme_to_idx)
         }
     )
     mir_encoder = MIREncoder(
         model_class=model_class,
-        loss_fn=phonetic_loss_fn
     )
 
     # Encode with MIREncoder (one-shot approach)
-    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
-        dataset=dataset,
+    result = mir_encoder.encode(
+        dataloader=loader,
         set_name="Spanish Phonetic (MIR, Format 3)",
         n_replay_samples=2,
         learning_rate=0.001,
-        batch_size=32,
         seed=42,
         alpha=0.1,
         collate_fn=collate_fn_format3,
@@ -542,6 +542,8 @@ def test_format3():
         use_ema=True
     )
 
+    model, code_length, code_length_history = result.model, result.code_length, result.history
+    ema_params, beta, replay_streams = result.ema_params, result.beta, result.replay
     print(f"MIR Encoder (Format 3) - Code length: {code_length}.")
 
 def test_default_encoding_fn():
@@ -553,11 +555,12 @@ def test_default_encoding_fn():
     print("="*80)
 
     # Create the dataset
-    dataset = SpanishPhoneticDatasetFormat3(data_path, max_samples=500)
+    base_dataset = BaseSpanishPhoneticDataset(data_path, max_samples=500)
+    dataset = build_spanish_dataset_format3(base_dataset)
 
     print(f"Dataset size: {len(dataset)}")
-    print(f"Number of characters: {len(dataset.char_to_idx)}")
-    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
+    print(f"Number of characters: {len(base_dataset.char_to_idx)}")
+    print(f"Number of phonemes: {len(base_dataset.phoneme_to_idx)}")
 
     # Test BlockEncoder with default encoding function
     print("\nTesting BlockEncoder with default encoding function...")
@@ -565,25 +568,24 @@ def test_default_encoding_fn():
         model=SimplePhoneticModel,
         device='cpu',
         kwargs={
-            'input_size': len(dataset.char_to_idx),
+            'input_size': len(base_dataset.char_to_idx),
             'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
+            'output_size': len(base_dataset.phoneme_to_idx)
         }
     )
-    # Note: No loss_fn provided, so it will use the default encoding function
     block_encoder = BlockEncoder(
         model_class=model_class
     )
 
     # Encode with BlockEncoder (one-shot approach)
-    model, code_length, code_length_history = block_encoder.encode(
-        dataset=dataset,
+    loader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=collate_fn_format1)
+    result = block_encoder.encode(
+        train_dataloader=[loader],
+        eval_dataloaders=[loader],
         set_name="Spanish Phonetic (Block, Default Encoding)",
         epochs=2,
         learning_rate=0.001,
-        batch_size=32,
         seed=42,
-        stop_points=[0.5, 1.0],
         patience=5,
         collate_fn=collate_fn_format3,
         use_device_handling=False
@@ -597,23 +599,21 @@ def test_default_encoding_fn():
         model=SimplePhoneticModel,
         device='cpu',
         kwargs={
-            'input_size': len(dataset.char_to_idx),
+            'input_size': len(base_dataset.char_to_idx),
             'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
+            'output_size': len(base_dataset.phoneme_to_idx)
         }
     )
-    # Note: No loss_fn provided, so it will use the default encoding function
     mir_encoder = MIREncoder(
         model_class=model_class
     )
 
     # Encode with MIREncoder (one-shot approach)
-    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
-        dataset=dataset,
+    result = mir_encoder.encode(
+        dataloader=loader,
         set_name="Spanish Phonetic (MIR, Default Encoding)",
         n_replay_samples=2,
         learning_rate=0.001,
-        batch_size=32,
         seed=42,
         alpha=0.1,
         collate_fn=collate_fn_format3,
@@ -633,11 +633,12 @@ def test_custom_encoding_fn_in_encode():
     print("="*80)
 
     # Create the dataset
-    dataset = SpanishPhoneticDatasetFormat3(data_path, max_samples=500)
+    base_dataset = BaseSpanishPhoneticDataset(data_path, max_samples=500)
+    dataset = build_spanish_dataset_format3(base_dataset)
 
     print(f"Dataset size: {len(dataset)}")
-    print(f"Number of characters: {len(dataset.char_to_idx)}")
-    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
+    print(f"Number of characters: {len(base_dataset.char_to_idx)}")
+    print(f"Number of phonemes: {len(base_dataset.phoneme_to_idx)}")
 
     # Define a custom encoding function with a multiplier to make it different from the default
     def custom_encoding_fn(outputs, targets, output_mask, target_mask):
@@ -653,31 +654,31 @@ def test_custom_encoding_fn_in_encode():
         model=SimplePhoneticModel,
         device='cpu',
         kwargs={
-            'input_size': len(dataset.char_to_idx),
+            'input_size': len(base_dataset.char_to_idx),
             'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
+            'output_size': len(base_dataset.phoneme_to_idx)
         }
     )
-    # Note: No loss_fn provided during initialization
     block_encoder = BlockEncoder(
         model_class=model_class
     )
 
     # Encode with BlockEncoder (one-shot approach) with custom encoding function
-    model, code_length, code_length_history = block_encoder.encode(
-        dataset=dataset,
+    loader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=collate_fn_format3)
+    result = block_encoder.encode(
+        train_dataloader=[loader],
+        eval_dataloaders=[loader],
         set_name="Spanish Phonetic (Block, Custom Encoding)",
         epochs=2,
         learning_rate=0.001,
-        batch_size=32,
         seed=42,
-        stop_points=[0.5, 1.0],
         patience=5,
         collate_fn=collate_fn_format3,
         use_device_handling=False,
         encoding_fn=custom_encoding_fn  # Pass custom encoding function here
     )
 
+    model, code_length, code_length_history = result.model, result.code_length, result.history
     print(f"Block Encoder (Custom Encoding) - Code length: {code_length}.")
 
     # Test MIREncoder with custom encoding function passed to encode()
@@ -686,23 +687,21 @@ def test_custom_encoding_fn_in_encode():
         model=SimplePhoneticModel,
         device='cpu',
         kwargs={
-            'input_size': len(dataset.char_to_idx),
+            'input_size': len(base_dataset.char_to_idx),
             'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
+            'output_size': len(base_dataset.phoneme_to_idx)
         }
     )
-    # Note: No loss_fn provided during initialization
     mir_encoder = MIREncoder(
         model_class=model_class
     )
 
     # Encode with MIREncoder (one-shot approach) with custom encoding function
-    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
-        dataset=dataset,
+    result = mir_encoder.encode(
+        dataloader=loader,
         set_name="Spanish Phonetic (MIR, Custom Encoding)",
         n_replay_samples=2,
         learning_rate=0.001,
-        batch_size=32,
         seed=42,
         alpha=0.1,
         collate_fn=collate_fn_format3,
@@ -723,11 +722,12 @@ def test_mir_encoder_without_beta():
     print("="*80)
 
     # Create the dataset
-    dataset = SpanishPhoneticDatasetFormat3(data_path, max_samples=500)
+    base_dataset = BaseSpanishPhoneticDataset(data_path, max_samples=500)
+    dataset = build_spanish_dataset_format3(base_dataset)
 
     print(f"Dataset size: {len(dataset)}")
-    print(f"Number of characters: {len(dataset.char_to_idx)}")
-    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
+    print(f"Number of characters: {len(base_dataset.char_to_idx)}")
+    print(f"Number of phonemes: {len(base_dataset.phoneme_to_idx)}")
 
     # Test MIREncoder without beta
     print("\nTesting MIREncoder without beta...")
@@ -735,23 +735,21 @@ def test_mir_encoder_without_beta():
         model=SimplePhoneticModel,
         device='cpu',
         kwargs={
-            'input_size': len(dataset.char_to_idx),
+            'input_size': len(base_dataset.char_to_idx),
             'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
+            'output_size': len(base_dataset.phoneme_to_idx)
         }
     )
     mir_encoder = MIREncoder(
         model_class=model_class,
-        loss_fn=phonetic_loss_fn
     )
 
     # Encode with MIREncoder (one-shot approach) without beta
-    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
-        dataset=dataset,
+    result = mir_encoder.encode(
+        dataloader=loader,
         set_name="Spanish Phonetic (MIR, Without Beta)",
         n_replay_samples=2,
         learning_rate=0.001,
-        batch_size=32,
         seed=42,
         alpha=0.1,
         collate_fn=collate_fn_format3,
@@ -771,11 +769,12 @@ def test_mir_encoder_without_ema():
     print("="*80)
 
     # Create the dataset
-    dataset = SpanishPhoneticDatasetFormat3(data_path, max_samples=500)
+    base_dataset = BaseSpanishPhoneticDataset(data_path, max_samples=500)
+    dataset = build_spanish_dataset_format3(base_dataset)
 
     print(f"Dataset size: {len(dataset)}")
-    print(f"Number of characters: {len(dataset.char_to_idx)}")
-    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
+    print(f"Number of characters: {len(base_dataset.char_to_idx)}")
+    print(f"Number of phonemes: {len(base_dataset.phoneme_to_idx)}")
 
     # Test MIREncoder without EMA
     print("\nTesting MIREncoder without EMA...")
@@ -783,23 +782,21 @@ def test_mir_encoder_without_ema():
         model=SimplePhoneticModel,
         device='cpu',
         kwargs={
-            'input_size': len(dataset.char_to_idx),
+            'input_size': len(base_dataset.char_to_idx),
             'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
+            'output_size': len(base_dataset.phoneme_to_idx)
         }
     )
     mir_encoder = MIREncoder(
         model_class=model_class,
-        loss_fn=phonetic_loss_fn
     )
 
     # Encode with MIREncoder (one-shot approach) without EMA
-    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
-        dataset=dataset,
+    result = mir_encoder.encode(
+        dataloader=loader,
         set_name="Spanish Phonetic (MIR, Without EMA)",
         n_replay_samples=2,
         learning_rate=0.001,
-        batch_size=32,
         seed=42,
         alpha=0.1,
         collate_fn=collate_fn_format3,
@@ -819,11 +816,12 @@ def test_mir_encoder_without_both():
     print("="*80)
 
     # Create the dataset
-    dataset = SpanishPhoneticDatasetFormat3(data_path, max_samples=500)
+    base_dataset = BaseSpanishPhoneticDataset(data_path, max_samples=500)
+    dataset = build_spanish_dataset_format3(base_dataset)
 
     print(f"Dataset size: {len(dataset)}")
-    print(f"Number of characters: {len(dataset.char_to_idx)}")
-    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
+    print(f"Number of characters: {len(base_dataset.char_to_idx)}")
+    print(f"Number of phonemes: {len(base_dataset.phoneme_to_idx)}")
 
     # Test MIREncoder without both beta and EMA
     print("\nTesting MIREncoder without both beta and EMA...")
@@ -831,23 +829,21 @@ def test_mir_encoder_without_both():
         model=SimplePhoneticModel,
         device='cpu',
         kwargs={
-            'input_size': len(dataset.char_to_idx),
+            'input_size': len(base_dataset.char_to_idx),
             'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
+            'output_size': len(base_dataset.phoneme_to_idx)
         }
     )
     mir_encoder = MIREncoder(
         model_class=model_class,
-        loss_fn=phonetic_loss_fn
     )
 
     # Encode with MIREncoder (one-shot approach) without both beta and EMA
-    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
-        dataset=dataset,
+    result = mir_encoder.encode(
+        dataloader=loader,
         set_name="Spanish Phonetic (MIR, Without Both)",
         n_replay_samples=2,
         learning_rate=0.001,
-        batch_size=32,
         seed=42,
         alpha=0.1,
         collate_fn=collate_fn_format3,
