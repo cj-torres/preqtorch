@@ -108,7 +108,7 @@ def prequential_collate(batch: Iterable):
     packed = default_collate(batch)
     if len(packed) == 2:
         inputs, targets = packed
-        output_mask = torch.ones_like(inputs, dtype=torch.bool)
+        output_mask = torch.ones_like(targets, dtype=torch.bool)
         target_mask = torch.ones_like(targets, dtype=torch.bool)
     elif len(packed) == 3:
         inputs, targets, shared_mask = packed

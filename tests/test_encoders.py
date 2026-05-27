@@ -591,6 +591,7 @@ def test_default_encoding_fn():
         use_device_handling=False
     )
 
+    model, code_length, code_length_history = result.model, result.code_length, result.history
     print(f"Block Encoder (Default Encoding) - Code length: {code_length}.")
 
     # Test MIREncoder with default encoding function
@@ -622,6 +623,7 @@ def test_default_encoding_fn():
         use_ema=True
     )
 
+    model, code_length, code_length_history = result.model, result.code_length, result.history
     print(f"MIR Encoder (Default Encoding) - Code length: {code_length}.")
 
 def test_custom_encoding_fn_in_encode():
@@ -745,6 +747,7 @@ def test_mir_encoder_without_beta():
     )
 
     # Encode with MIREncoder (one-shot approach) without beta
+    loader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=collate_fn_format3)
     result = mir_encoder.encode(
         dataloader=loader,
         set_name="Spanish Phonetic (MIR, Without Beta)",
@@ -758,6 +761,7 @@ def test_mir_encoder_without_beta():
         use_ema=True     # Keep EMA enabled
     )
 
+    model, code_length, code_length_history = result.model, result.code_length, result.history
     print(f"MIR Encoder (Without Beta) - Code length: {code_length}.")
 
 def test_mir_encoder_without_ema():
@@ -792,6 +796,7 @@ def test_mir_encoder_without_ema():
     )
 
     # Encode with MIREncoder (one-shot approach) without EMA
+    loader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=collate_fn_format3)
     result = mir_encoder.encode(
         dataloader=loader,
         set_name="Spanish Phonetic (MIR, Without EMA)",
@@ -805,6 +810,7 @@ def test_mir_encoder_without_ema():
         use_ema=False    # Disable EMA
     )
 
+    model, code_length, code_length_history = result.model, result.code_length, result.history
     print(f"MIR Encoder (Without EMA) - Code length: {code_length}.")
 
 def test_mir_encoder_without_both():
@@ -839,6 +845,7 @@ def test_mir_encoder_without_both():
     )
 
     # Encode with MIREncoder (one-shot approach) without both beta and EMA
+    loader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=collate_fn_format3)
     result = mir_encoder.encode(
         dataloader=loader,
         set_name="Spanish Phonetic (MIR, Without Both)",
@@ -852,6 +859,7 @@ def test_mir_encoder_without_both():
         use_ema=False    # Disable EMA
     )
 
+    model, code_length, code_length_history = result.model, result.code_length, result.history
     print(f"MIR Encoder (Without Both Beta and EMA) - Code length: {code_length}.")
 
 if __name__ == "__main__":
