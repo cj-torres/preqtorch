@@ -1,8 +1,6 @@
 import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, Subset
-from copy import deepcopy
-import os, random
+from torch.utils.data import DataLoader, Dataset
+import random
 import warnings
 
 

@@ -1,5 +1,6 @@
 import math
 import random
+import inspect
 
 import torch
 import torch.nn.functional as F
@@ -43,9 +44,9 @@ class PrequentialEncoder:
         return self
 
     def _get_default_encoding_fn(self):
-        def encoding_fn(outputs, targets, output_mask, target_mask):
+        def encoding_fn(outputs, targets, mask):
             log2 = torch.tensor(LOG2, device=outputs.device)
-            return torch.nn.functional.cross_entropy(outputs[output_mask], targets[target_mask], reduction='none') / log2
+            return torch.nn.functional.cross_entropy(outputs[mask], targets[mask], reduction='none') / log2
 
         return encoding_fn
 
@@ -56,6 +57,32 @@ class PrequentialEncoder:
 
     def _sample_model_class(self):
         return self.model_class.initialize()
+
+    @staticmethod
+    def _callable_accepts_n_positional_args(fn, n_required):
+        sig = inspect.signature(fn)
+        params = list(sig.parameters.values())
+        positional = [p for p in params if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+        has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
+        required_positional = [p for p in positional if p.default is inspect._empty]
+        return has_varargs or (len(positional) >= n_required and len(required_positional) <= n_required)
+
+    def _validate_model_forward_contract(self, model):
+        if not self._callable_accepts_n_positional_args(model.forward, 3):
+            signature = inspect.signature(model.forward)
+            raise TypeError(
+                "Model forward contract mismatch. Expected forward(inputs, target_mask, targets). "
+                f"Got forward{signature}."
+            )
+
+    def _validate_encoding_fn_contract(self, encoding_fn):
+        if not self._callable_accepts_n_positional_args(encoding_fn, 3):
+            signature = inspect.signature(encoding_fn)
+            name = getattr(encoding_fn, '__name__', 'encoding_fn')
+            raise TypeError(
+                "Encoding function contract mismatch. Expected fn(outputs, targets, mask). "
+                f"Got {name}{signature}."
+            )
 
     def _get_default_mask(self, tensor):
         key = (tuple(tensor.shape), tensor.device, torch.bool)
@@ -137,9 +164,11 @@ class BlockEncoder(PrequentialEncoder):
 
     def calculate_code_length(self, model, batch, encoding_fn=None, use_device_handling=True):
         encoding_fn = encoding_fn or self._get_default_encoding_fn()
+        self._validate_model_forward_contract(model)
+        self._validate_encoding_fn_contract(encoding_fn)
         spec = self._normalize_batch(batch, use_device_handling=use_device_handling)
-        outputs = model(spec.inputs)
-        code_lengths = encoding_fn(outputs, spec.targets, spec.output_mask, spec.target_mask)
+        outputs = model(spec.inputs, spec.target_mask, spec.targets)
+        code_lengths = encoding_fn(outputs, spec.targets, spec.target_mask)
         return code_lengths, spec.inputs, spec.targets, spec.target_mask, spec.output_mask
 
     def eval_code_length(self, state, dataloader, encoding_fn=None, use_device_handling=True):
@@ -294,6 +323,8 @@ class MIREncoder(PrequentialEncoder):
         model = state.model
         beta = state.beta
         ema_params = state.ema_params
+        self._validate_model_forward_contract(model)
+        self._validate_encoding_fn_contract(encoding_fn)
 
         spec = self._normalize_batch(batch, use_device_handling=use_device_handling)
         inputs = spec.inputs
@@ -305,14 +336,14 @@ class MIREncoder(PrequentialEncoder):
             params_and_buffers = {name: buffer for name, buffer in model.named_buffers()}
             params_and_buffers.update({name: param for name, param in model.named_parameters()})
             params_and_buffers.update({name: value for name, value in ema_params.items() if name in params_and_buffers})
-            outputs = functional_call(model, params_and_buffers, (inputs,))
+            outputs = functional_call(model, params_and_buffers, (inputs, target_mask, target))
         else:
-            outputs = model(inputs)
+            outputs = model(inputs, target_mask, target)
 
         if beta is not None and use_beta:
             outputs = outputs * F.softplus(beta)
 
-        code_lengths = encoding_fn(outputs, target, output_mask, target_mask)
+        code_lengths = encoding_fn(outputs, target, target_mask)
         return code_lengths, inputs, target, target_mask, output_mask
 
     def finalize(self, state):

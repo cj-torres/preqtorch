@@ -44,7 +44,7 @@ class SimplePhoneticModel(nn.Module):
         self.output_size = output_size
         self.fc = nn.Linear(hidden_size, self.output_size)
 
-    def forward(self, x, target_in=None):
+    def forward(self, x, target_mask=None, target=None):
         # Handle device placement in the forward method
         device = next(self.parameters()).device
 
@@ -643,10 +643,10 @@ def test_custom_encoding_fn_in_encode():
     print(f"Number of phonemes: {len(base_dataset.phoneme_to_idx)}")
 
     # Define a custom encoding function with a multiplier to make it different from the default
-    def custom_encoding_fn(outputs, targets, output_mask, target_mask):
+    def custom_encoding_fn(outputs, targets, mask):
         # Apply masks to outputs and targets
-        masked_outputs = outputs[output_mask]
-        masked_targets = targets[target_mask]
+        masked_outputs = outputs[mask]
+        masked_targets = targets[mask]
         # Use a multiplier of 1.5 to make it different from the default
         return 1.5 * F.cross_entropy(masked_outputs, masked_targets, reduction='none')/torch.log(torch.tensor(2.0, device=outputs.device))
 
