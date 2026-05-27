@@ -46,8 +46,17 @@ You may provide custom:
 
 directly to `encode(...)`, with the user owning dataloader construction.
 
+If you pass `collate_fn` to `encode(...)`, encoders will apply it when iterating the provided dataloaders.
+
 ### Dataset formatting
 
+Use one of the following sample schemas throughout your data pipeline:
+
+1. `(inputs, targets)`
+2. `(inputs, targets, shared_mask)`
+3. `(inputs, targets, output_mask, target_mask)`
+
+When masks are omitted, PreqTorch now defaults masks to the `targets` shape to align with code-length computation over predictions/targets.
 
 ### PrequentialDataLoader
 

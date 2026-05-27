@@ -4,7 +4,6 @@ import random
 import torch
 import torch.nn.functional as F
 from torch.func import functional_call
-from torch.utils.data import DataLoader
 
 from .batches import PrequentialBatch
 from .replay import ReplayBuffer, ReplayStreams, ReplayingDataLoader
@@ -66,13 +65,15 @@ class PrequentialEncoder:
             self._default_mask_cache[key] = mask
         return mask
 
-    def _normalize_batch(self, batch):
+    def _normalize_batch(self, batch, use_device_handling=True):
         if isinstance(batch, PrequentialBatch):
-            return batch.to(self.device, non_blocking=self.pin_memory)
+            if use_device_handling:
+                return batch.to(self.device, non_blocking=self.pin_memory)
+            return batch
         if isinstance(batch, (tuple, list)):
             if len(batch) == 2:
                 inputs, targets = batch
-                output_mask = self._get_default_mask(inputs)
+                output_mask = self._get_default_mask(targets)
                 target_mask = self._get_default_mask(targets)
             elif len(batch) == 3:
                 inputs, targets, mask = batch
@@ -82,7 +83,10 @@ class PrequentialEncoder:
                 inputs, targets, output_mask, target_mask = batch
             else:
                 raise ValueError("Unsupported batch format")
-            return PrequentialBatch(inputs, targets, output_mask, target_mask).to(self.device, non_blocking=self.pin_memory)
+            normalized = PrequentialBatch(inputs, targets, output_mask, target_mask)
+            if use_device_handling:
+                return normalized.to(self.device, non_blocking=self.pin_memory)
+            return normalized
         raise TypeError("Unsupported batch type")
 
 
@@ -101,37 +105,55 @@ class BlockEncoder(PrequentialEncoder):
         if len(train_dataloader) != len(eval_dataloaders):
             raise ValueError("train_dataloader and eval_dataloaders must have same length")
 
+        if collate_fn is not None:
+            def _with_collate(loader):
+                return loader if loader.collate_fn is collate_fn else torch.utils.data.DataLoader(
+                    dataset=loader.dataset,
+                    batch_size=loader.batch_size,
+                    shuffle=False,
+                    sampler=loader.sampler,
+                    num_workers=loader.num_workers,
+                    pin_memory=loader.pin_memory,
+                    drop_last=loader.drop_last,
+                    timeout=loader.timeout,
+                    worker_init_fn=loader.worker_init_fn,
+                    collate_fn=collate_fn,
+                )
+
+            train_dataloader = [_with_collate(loader) for loader in train_dataloader]
+            eval_dataloaders = [_with_collate(loader) for loader in eval_dataloaders]
+
         initial_weights = {name: value.detach().clone() for name, value in state.model.state_dict().items()}
 
         for i, (train_loader, eval_loader) in enumerate(zip(train_dataloader, eval_dataloaders)):
-            self.eval_code_length(state, eval_loader, encoding_fn)
+            self.eval_code_length(state, eval_loader, encoding_fn, use_device_handling=use_device_handling)
             if i == len(train_dataloader) - 1:
                 break
             state.model.load_state_dict(initial_weights)
-            self.train_until_patience(state, train_loader, patience, epochs)
+            self.train_until_patience(state, train_loader, patience, epochs, use_device_handling=use_device_handling)
 
         print(f"Performance for {set_name}: Prequential code length: {state.code_length}")
         return EncoderResult(state.model, state.code_length, state.history)
 
-    def calculate_code_length(self, model, batch, encoding_fn=None):
+    def calculate_code_length(self, model, batch, encoding_fn=None, use_device_handling=True):
         encoding_fn = encoding_fn or self._get_default_encoding_fn()
-        spec = self._normalize_batch(batch)
+        spec = self._normalize_batch(batch, use_device_handling=use_device_handling)
         outputs = model(spec.inputs)
         code_lengths = encoding_fn(outputs, spec.targets, spec.output_mask, spec.target_mask)
         return code_lengths, spec.inputs, spec.targets, spec.target_mask, spec.output_mask
 
-    def eval_code_length(self, state, dataloader, encoding_fn=None):
+    def eval_code_length(self, state, dataloader, encoding_fn=None, use_device_handling=True):
         encoding_fn = encoding_fn or state.encoding_fn or self._get_default_encoding_fn()
         model = state.model
         model.eval()
         with torch.inference_mode():
             for batch in dataloader:
-                code_lengths, _, _, _, _ = self.calculate_code_length(model, batch, encoding_fn)
+                code_lengths, _, _, _, _ = self.calculate_code_length(model, batch, encoding_fn, use_device_handling=use_device_handling)
                 value = code_lengths.sum().item()
                 state.code_length += value
                 state.history.append(value)
 
-    def train_until_patience(self, state, train_dataloader, patience, epochs):
+    def train_until_patience(self, state, train_dataloader, patience, epochs, use_device_handling=True):
         best_loss = float('inf')
         no_improvement = 0
         model = state.model
@@ -142,7 +164,7 @@ class BlockEncoder(PrequentialEncoder):
             for batch in train_dataloader:
                 encoding_fn = state.encoding_fn or self._get_default_encoding_fn()
                 optim.zero_grad()
-                code_lengths, _, _, _, _ = self.calculate_code_length(model, batch, encoding_fn)
+                code_lengths, _, _, _, _ = self.calculate_code_length(model, batch, encoding_fn, use_device_handling=use_device_handling)
                 loss = code_lengths.sum()
                 loss.backward()
                 optim.step()
@@ -179,7 +201,7 @@ class MIREncoder(PrequentialEncoder):
             pin_memory=pin_memory)
 
         for batch in replay_loader:
-            self.step(batch, replay_loader, state, alpha)
+            self.step(batch, replay_loader, state, alpha, use_device_handling=use_device_handling)
 
         model, code_length, history, ema_params, beta = self.finalize(state)
         return EncoderResult(model, code_length, history, ema_params=ema_params, beta=beta, replay=replay_loader.replay)
@@ -224,7 +246,7 @@ class MIREncoder(PrequentialEncoder):
         state = EncoderState(model, optim, beta, beta_optim, ema_params, trained_params, encoding_fn=encoding_fn)
         return state, replay_loader
 
-    def step(self, batch, replay_loader, state, alpha=0.1):
+    def step(self, batch, replay_loader, state, alpha=0.1, use_device_handling=True):
         model = state.model
         beta = state.beta
 
@@ -233,7 +255,7 @@ class MIREncoder(PrequentialEncoder):
         if use_beta:
             state.beta_optim.zero_grad()
 
-        code_lengths, _, _, _, _ = self.calculate_code_length(state, batch)
+        code_lengths, _, _, _, _ = self.calculate_code_length(state, batch, use_device_handling=use_device_handling)
         loss = code_lengths.sum()
         state.code_length += loss.detach()
         state.history.append(loss.detach())
@@ -243,7 +265,7 @@ class MIREncoder(PrequentialEncoder):
             state.beta_optim.zero_grad()
         if use_beta or state.ema_params is not None:
             state.optim.zero_grad()
-            code_lengths, _, _, _, _ = self.calculate_code_length(state, batch, False, False)
+            code_lengths, _, _, _, _ = self.calculate_code_length(state, batch, False, False, use_device_handling=use_device_handling)
             loss = code_lengths.sum()
             loss.backward()
         state.optim.step()
@@ -258,7 +280,7 @@ class MIREncoder(PrequentialEncoder):
 
         for _, replay_batch in replay_loader.sample_replay():
             state.optim.zero_grad()
-            code_lengths, _, _, _, _ = self.calculate_code_length(state, replay_batch, False, False)
+            code_lengths, _, _, _, _ = self.calculate_code_length(state, replay_batch, False, False, use_device_handling=use_device_handling)
             loss = code_lengths.sum()
             loss.backward()
             state.optim.step()
@@ -267,13 +289,13 @@ class MIREncoder(PrequentialEncoder):
                     for name, param in model.named_parameters():
                         state.ema_params[name] = state.ema_params[name] * (1 - alpha) + param * alpha
 
-    def calculate_code_length(self, state, batch, use_ema=True, use_beta=True):
+    def calculate_code_length(self, state, batch, use_ema=True, use_beta=True, use_device_handling=True):
         encoding_fn = state.encoding_fn or self._get_default_encoding_fn()
         model = state.model
         beta = state.beta
         ema_params = state.ema_params
 
-        spec = self._normalize_batch(batch)
+        spec = self._normalize_batch(batch, use_device_handling=use_device_handling)
         inputs = spec.inputs
         target = spec.targets
         output_mask = spec.output_mask
