@@ -62,7 +62,7 @@ When masks are omitted, PreqTorch now defaults masks to the `targets` shape to a
 
 `PrequentialDataset` and `PrequentialDataLoader` follow PyTorch conventions: dataset owns indexing logic; dataloader owns batching/shuffling/iteration.
 
-It accepts indexable sources at initialization and requires keyword arguments `inputs` and `targets`. Optional `masks` and `target_masks` are also supported.
+It accepts a mandatory `PrequentialDataset` at initialization. Optional dataloader arguments (e.g. `shuffle`, `batch_size`, `collate_fn`) are also supported.
 
 ```python
 from preqtorch import PrequentialDataset, PrequentialDataLoader
@@ -75,10 +75,7 @@ dataset = PrequentialDataset(
 )
 
 loader = PrequentialDataLoader(
-    inputs=my_inputs,
-    targets=my_targets,
-    masks=my_output_masks,
-    target_masks=my_target_masks,
+    dataset=dataset,
     shuffle=True,
 )
 ```
