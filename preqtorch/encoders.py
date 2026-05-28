@@ -30,7 +30,12 @@ class EncoderState:
 class PrequentialEncoder:
     def __init__(self, model_class: ModelClass, device=None, optimizer_fn=None, pin_memory=False):
         self.model_class = model_class
-        self.device = device if device is not None else ('cuda' if torch.cuda.is_available() else 'cpu')
+        if device is not None:
+            self.device = device
+        elif hasattr(model_class, "device"):
+            self.device = model_class.device
+        else:
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if hasattr(self.model_class, 'to'):
             self.model_class.to(self.device)
         self.optimizer_fn = optimizer_fn
