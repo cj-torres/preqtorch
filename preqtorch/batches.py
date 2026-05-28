@@ -94,10 +94,11 @@ class PrequentialDataset(Dataset):
 
 
 class PrequentialDataLoader(DataLoader):
-    """DataLoader specializing prequential batch schemas from indexable sources."""
+    """DataLoader specializing prequential batch schemas from PrequentialDataset."""
 
-    def __init__(self, *, inputs, targets, masks=None, target_masks=None, batch_size=1, shuffle=False, pin_memory=False, **kwargs):
-        dataset = PrequentialDataset(inputs, targets, masks=masks, target_masks=target_masks)
+    def __init__(self, dataset, *, batch_size=1, shuffle=False, pin_memory=False, **kwargs):
+        if not isinstance(dataset, PrequentialDataset):
+            raise TypeError("dataset must be a PrequentialDataset")
         collate_fn = kwargs.pop("collate_fn", None) or prequential_collate
         super().__init__(dataset=dataset, batch_size=batch_size, shuffle=shuffle, pin_memory=pin_memory, collate_fn=collate_fn, **kwargs)
 

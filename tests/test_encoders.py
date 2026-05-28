@@ -5,7 +5,8 @@ def test_preq_loader_from_indexables():
     ys = [torch.tensor(i % 2) for i in range(5)]
     ms = [torch.tensor(True) for _ in range(5)]
 
-    loader = PrequentialDataLoader(inputs=xs, targets=ys, masks=ms, batch_size=2, shuffle=False)
+    dataset = PrequentialDataset(inputs=xs, targets=ys, masks=ms)
+    loader = PrequentialDataLoader(dataset, batch_size=2, shuffle=False)
     batch = next(iter(loader))
 
     assert hasattr(batch, "inputs")
