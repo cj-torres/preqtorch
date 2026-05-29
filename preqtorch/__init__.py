@@ -1,9 +1,8 @@
-# Import from the preqtorch package
 from .utils import ModelClass
 from .replay import ReplayStreams, ReplayBuffer, Replay, ReplayingDataLoader
 from .encoders import BlockEncoder, MIREncoder, PrequentialEncoder, EncoderState
 from .results import EncoderResult
-from .batches import PrequentialBatch, PrequentialDataset, PrequentialDataLoader, prequential_collate
+from .batches import move_to_device
 
 
 __all__ = [
@@ -17,8 +16,5 @@ __all__ = [
     'ReplayBuffer',
     'ReplayingDataLoader',
     'EncoderResult',
-    'PrequentialBatch',
-    'PrequentialDataset',
-    'PrequentialDataLoader',
-    'prequential_collate',
+    'move_to_device',
 ]

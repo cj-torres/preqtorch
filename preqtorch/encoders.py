@@ -1,28 +1,24 @@
-import math
-import random
 import inspect
+import random
 
 import torch
-import torch.nn.functional as F
 from torch.func import functional_call
 
-from .batches import PrequentialBatch
+from .batches import move_to_device
 from .replay import ReplayBuffer, ReplayStreams, ReplayingDataLoader
 from .results import EncoderResult
 from .utils import ModelClass
 
-LOG2 = math.log(2)
-
 
 class EncoderState:
-    def __init__(self, model, optim, beta, beta_optim, ema_params, trained_params, encoding_fn=None):
+    def __init__(self, model, optim, beta, beta_optim, ema_params, trained_params, loss_fn):
         self.model = model
         self.optim = optim
         self.beta = beta
         self.beta_optim = beta_optim
         self.ema_params = ema_params
         self.trained_params = trained_params
-        self.encoding_fn = encoding_fn
+        self.loss_fn = loss_fn
         self.code_length = 0
         self.history = []
 
@@ -40,20 +36,12 @@ class PrequentialEncoder:
             self.model_class.to(self.device)
         self.optimizer_fn = optimizer_fn
         self.pin_memory = pin_memory
-        self._default_mask_cache = {}
 
     def to(self, device):
         self.device = device
         if hasattr(self.model_class, 'to'):
             self.model_class.to(device)
         return self
-
-    def _get_default_encoding_fn(self):
-        def encoding_fn(outputs, targets, mask):
-            log2 = torch.tensor(LOG2, device=outputs.device)
-            return torch.nn.functional.cross_entropy(outputs[mask], targets[mask], reduction='none') / log2
-
-        return encoding_fn
 
     def _get_optimizer(self, model, learning_rate):
         if self.optimizer_fn is None:
@@ -73,92 +61,51 @@ class PrequentialEncoder:
         return has_varargs or (len(positional) >= n_required and len(required_positional) <= n_required)
 
     def _validate_model_forward_contract(self, model):
-        if not self._callable_accepts_n_positional_args(model.forward, 3):
+        if not self._callable_accepts_n_positional_args(model.forward, 1):
             signature = inspect.signature(model.forward)
             raise TypeError(
-                "Model forward contract mismatch. Expected forward(inputs, target_mask, targets). "
+                "Model forward contract mismatch. Expected forward(batch). "
                 f"Got forward{signature}."
             )
 
-    def _validate_encoding_fn_contract(self, encoding_fn):
-        if not self._callable_accepts_n_positional_args(encoding_fn, 3):
-            signature = inspect.signature(encoding_fn)
-            name = getattr(encoding_fn, '__name__', 'encoding_fn')
+    def _validate_loss_fn_contract(self, loss_fn):
+        if loss_fn is None:
+            raise ValueError("A loss_fn must be provided. Expected loss_fn(batch, output).")
+        if not self._callable_accepts_n_positional_args(loss_fn, 2):
+            signature = inspect.signature(loss_fn)
+            name = getattr(loss_fn, '__name__', 'loss_fn')
             raise TypeError(
-                "Encoding function contract mismatch. Expected fn(outputs, targets, mask). "
+                "Loss function contract mismatch. Expected fn(batch, output). "
                 f"Got {name}{signature}."
             )
 
-    def _get_default_mask(self, tensor):
-        key = (tuple(tensor.shape), tensor.device, torch.bool)
-        mask = self._default_mask_cache.get(key)
-        if mask is None or (not torch.is_inference_mode_enabled() and mask.is_inference()):
-            mask = torch.ones_like(tensor, dtype=torch.bool, device=tensor.device)
-            self._default_mask_cache[key] = mask
-        return mask
-
-    def _normalize_batch(self, batch, use_device_handling=True):
-        if isinstance(batch, PrequentialBatch):
-            if use_device_handling:
-                return batch.to(self.device, non_blocking=self.pin_memory)
-            return batch
-        if isinstance(batch, (tuple, list)):
-            if len(batch) == 2:
-                inputs, targets = batch
-                output_mask = self._get_default_mask(targets)
-                target_mask = self._get_default_mask(targets)
-            elif len(batch) == 3:
-                inputs, targets, mask = batch
-                output_mask = mask
-                target_mask = mask
-            elif len(batch) == 4:
-                inputs, targets, output_mask, target_mask = batch
-            else:
-                raise ValueError("Unsupported batch format")
-            normalized = PrequentialBatch(inputs, targets, output_mask, target_mask)
-            if use_device_handling:
-                return normalized.to(self.device, non_blocking=self.pin_memory)
-            return normalized
-        raise TypeError("Unsupported batch type")
+    def _prepare_batch(self, batch, use_device_handling=True):
+        if use_device_handling:
+            return move_to_device(batch, self.device, non_blocking=self.pin_memory)
+        return batch
 
 
 class BlockEncoder(PrequentialEncoder):
-    def encode(self, train_dataloader, eval_dataloaders, set_name, seed, learning_rate=1e-4, epochs=50, patience=20, collate_fn=None, use_device_handling=True, encoding_fn=None):
+    def encode(self, train_dataloader, eval_dataloaders, set_name, seed, loss_fn=None,
+               learning_rate=1e-4, epochs=50, patience=20, use_device_handling=True):
+        self._validate_loss_fn_contract(loss_fn)
         torch.manual_seed(seed)
         random.seed(seed)
 
         model = self._sample_model_class()
         model.to(self.device)
         optim = self._get_optimizer(model, learning_rate)
-        encoding_fn = encoding_fn or self._get_default_encoding_fn()
 
-        state = EncoderState(model=model, optim=optim, beta=None, beta_optim=None, ema_params=None, trained_params=None, encoding_fn=encoding_fn)
+        state = EncoderState(model=model, optim=optim, beta=None, beta_optim=None,
+                             ema_params=None, trained_params=None, loss_fn=loss_fn)
 
         if len(train_dataloader) != len(eval_dataloaders):
             raise ValueError("train_dataloader and eval_dataloaders must have same length")
 
-        if collate_fn is not None:
-            def _with_collate(loader):
-                return loader if loader.collate_fn is collate_fn else torch.utils.data.DataLoader(
-                    dataset=loader.dataset,
-                    batch_size=loader.batch_size,
-                    shuffle=False,
-                    sampler=loader.sampler,
-                    num_workers=loader.num_workers,
-                    pin_memory=loader.pin_memory,
-                    drop_last=loader.drop_last,
-                    timeout=loader.timeout,
-                    worker_init_fn=loader.worker_init_fn,
-                    collate_fn=collate_fn,
-                )
-
-            train_dataloader = [_with_collate(loader) for loader in train_dataloader]
-            eval_dataloaders = [_with_collate(loader) for loader in eval_dataloaders]
-
         initial_weights = {name: value.detach().clone() for name, value in state.model.state_dict().items()}
 
         for i, (train_loader, eval_loader) in enumerate(zip(train_dataloader, eval_dataloaders)):
-            self.eval_code_length(state, eval_loader, encoding_fn, use_device_handling=use_device_handling)
+            self.eval_code_length(state, eval_loader, loss_fn, use_device_handling=use_device_handling)
             if i == len(train_dataloader) - 1:
                 break
             state.model.load_state_dict(initial_weights)
@@ -167,22 +114,21 @@ class BlockEncoder(PrequentialEncoder):
         print(f"Performance for {set_name}: Prequential code length: {state.code_length}")
         return EncoderResult(state.model, state.code_length, state.history)
 
-    def calculate_code_length(self, model, batch, encoding_fn=None, use_device_handling=True):
-        encoding_fn = encoding_fn or self._get_default_encoding_fn()
+    def calculate_code_length(self, model, batch, loss_fn, use_device_handling=True):
         self._validate_model_forward_contract(model)
-        self._validate_encoding_fn_contract(encoding_fn)
-        spec = self._normalize_batch(batch, use_device_handling=use_device_handling)
-        outputs = model(spec.inputs, spec.target_mask, spec.targets)
-        code_lengths = encoding_fn(outputs, spec.targets, spec.target_mask)
-        return code_lengths, spec.inputs, spec.targets, spec.target_mask, spec.output_mask
+        self._validate_loss_fn_contract(loss_fn)
+        batch = self._prepare_batch(batch, use_device_handling=use_device_handling)
+        output = model(batch)
+        code_lengths = loss_fn(batch, output)
+        return code_lengths, batch, output
 
-    def eval_code_length(self, state, dataloader, encoding_fn=None, use_device_handling=True):
-        encoding_fn = encoding_fn or state.encoding_fn or self._get_default_encoding_fn()
+    def eval_code_length(self, state, dataloader, loss_fn=None, use_device_handling=True):
+        loss_fn = loss_fn or state.loss_fn
         model = state.model
         model.eval()
         with torch.inference_mode():
             for batch in dataloader:
-                code_lengths, _, _, _, _ = self.calculate_code_length(model, batch, encoding_fn, use_device_handling=use_device_handling)
+                code_lengths, _, _ = self.calculate_code_length(model, batch, loss_fn, use_device_handling=use_device_handling)
                 value = code_lengths.sum().item()
                 state.code_length += value
                 state.history.append(value)
@@ -196,9 +142,8 @@ class BlockEncoder(PrequentialEncoder):
 
         for _ in range(epochs):
             for batch in train_dataloader:
-                encoding_fn = state.encoding_fn or self._get_default_encoding_fn()
                 optim.zero_grad()
-                code_lengths, _, _, _, _ = self.calculate_code_length(model, batch, encoding_fn, use_device_handling=use_device_handling)
+                code_lengths, _, _ = self.calculate_code_length(model, batch, state.loss_fn, use_device_handling=use_device_handling)
                 loss = code_lengths.sum()
                 loss.backward()
                 optim.step()
@@ -214,9 +159,10 @@ class BlockEncoder(PrequentialEncoder):
 
 
 class MIREncoder(PrequentialEncoder):
-    def encode(self, dataloader, set_name, n_replay_samples, learning_rate=1e-4,
+    def encode(self, dataloader, set_name, n_replay_samples, loss_fn=None, learning_rate=1e-4,
                seed=42, alpha=0.1, collate_fn=None, pin_memory=None, use_device_handling=True, use_beta=True,
-               use_ema=True, shuffle=True, replay_type="buffer", encoding_fn=None):
+               use_ema=True, shuffle=True, replay_type="buffer"):
+        self._validate_loss_fn_contract(loss_fn)
         if pin_memory is None:
             pin_memory = self.pin_memory
         self.pin_memory = pin_memory
@@ -231,7 +177,7 @@ class MIREncoder(PrequentialEncoder):
 
         state, replay_loader = self.initialize(
             dataset, batch_size, seed, n_replay_samples, replay_type,
-            None, learning_rate, alpha, collate_fn, shuffle, use_beta, use_ema, encoding_fn,
+            None, learning_rate, alpha, collate_fn, shuffle, use_beta, use_ema, loss_fn,
             pin_memory=pin_memory)
 
         for batch in replay_loader:
@@ -242,7 +188,8 @@ class MIREncoder(PrequentialEncoder):
 
     def initialize(self, dataset, batch_size, seed, n_replay_samples, replay_type="buffer",
                    model=None, learning_rate=1e-4, alpha=0.1, collate_fn=None, shuffle=True, use_beta=True,
-                   use_ema=False, encoding_fn=None, pin_memory=False):
+                   use_ema=False, loss_fn=None, pin_memory=False):
+        self._validate_loss_fn_contract(loss_fn)
         torch.manual_seed(seed)
         random.seed(seed)
 
@@ -274,11 +221,14 @@ class MIREncoder(PrequentialEncoder):
             ema_params = None
             trained_params = {name: param.clone().detach() for name, param in model.named_parameters()}
 
-        if encoding_fn is None:
-            encoding_fn = self._get_default_encoding_fn()
-
-        state = EncoderState(model, optim, beta, beta_optim, ema_params, trained_params, encoding_fn=encoding_fn)
+        state = EncoderState(model, optim, beta, beta_optim, ema_params, trained_params, loss_fn=loss_fn)
         return state, replay_loader
+
+    @staticmethod
+    def _scale_output(output, beta):
+        if not isinstance(output, torch.Tensor):
+            raise TypeError("use_beta=True requires the model output to be a torch.Tensor")
+        return output * torch.nn.functional.softplus(beta)
 
     def step(self, batch, replay_loader, state, alpha=0.1, use_device_handling=True):
         model = state.model
@@ -289,7 +239,7 @@ class MIREncoder(PrequentialEncoder):
         if use_beta:
             state.beta_optim.zero_grad()
 
-        code_lengths, _, _, _, _ = self.calculate_code_length(state, batch, use_device_handling=use_device_handling)
+        code_lengths, _, _ = self.calculate_code_length(state, batch, use_device_handling=use_device_handling)
         loss = code_lengths.sum()
         state.code_length += loss.detach()
         state.history.append(loss.detach())
@@ -299,7 +249,7 @@ class MIREncoder(PrequentialEncoder):
             state.beta_optim.zero_grad()
         if use_beta or state.ema_params is not None:
             state.optim.zero_grad()
-            code_lengths, _, _, _, _ = self.calculate_code_length(state, batch, False, False, use_device_handling=use_device_handling)
+            code_lengths, _, _ = self.calculate_code_length(state, batch, False, False, use_device_handling=use_device_handling)
             loss = code_lengths.sum()
             loss.backward()
         state.optim.step()
@@ -314,7 +264,7 @@ class MIREncoder(PrequentialEncoder):
 
         for _, replay_batch in replay_loader.sample_replay():
             state.optim.zero_grad()
-            code_lengths, _, _, _, _ = self.calculate_code_length(state, replay_batch, False, False, use_device_handling=use_device_handling)
+            code_lengths, _, _ = self.calculate_code_length(state, replay_batch, False, False, use_device_handling=use_device_handling)
             loss = code_lengths.sum()
             loss.backward()
             state.optim.step()
@@ -324,32 +274,28 @@ class MIREncoder(PrequentialEncoder):
                         state.ema_params[name] = state.ema_params[name] * (1 - alpha) + param * alpha
 
     def calculate_code_length(self, state, batch, use_ema=True, use_beta=True, use_device_handling=True):
-        encoding_fn = state.encoding_fn or self._get_default_encoding_fn()
+        loss_fn = state.loss_fn
         model = state.model
         beta = state.beta
         ema_params = state.ema_params
         self._validate_model_forward_contract(model)
-        self._validate_encoding_fn_contract(encoding_fn)
+        self._validate_loss_fn_contract(loss_fn)
 
-        spec = self._normalize_batch(batch, use_device_handling=use_device_handling)
-        inputs = spec.inputs
-        target = spec.targets
-        output_mask = spec.output_mask
-        target_mask = spec.target_mask
+        batch = self._prepare_batch(batch, use_device_handling=use_device_handling)
 
         if ema_params is not None and use_ema:
             params_and_buffers = {name: buffer for name, buffer in model.named_buffers()}
             params_and_buffers.update({name: param for name, param in model.named_parameters()})
             params_and_buffers.update({name: value for name, value in ema_params.items() if name in params_and_buffers})
-            outputs = functional_call(model, params_and_buffers, (inputs, target_mask, target))
+            output = functional_call(model, params_and_buffers, (batch,))
         else:
-            outputs = model(inputs, target_mask, target)
+            output = model(batch)
 
         if beta is not None and use_beta:
-            outputs = outputs * F.softplus(beta)
+            output = self._scale_output(output, beta)
 
-        code_lengths = encoding_fn(outputs, target, target_mask)
-        return code_lengths, inputs, target, target_mask, output_mask
+        code_lengths = loss_fn(batch, output)
+        return code_lengths, batch, output
 
     def finalize(self, state):
         if self.device != 'cpu':
