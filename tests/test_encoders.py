@@ -1,862 +1,368 @@
+import pytest
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import os
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import BatchSampler, DataLoader, IterableDataset, SubsetRandomSampler, TensorDataset
 
-# Import directly from the package
-from preqtorch import BlockEncoder, MIREncoder, ModelClass
+from preqtorch import BlockEncoder, EncoderResult, MIREncoder, ModelClass, Replay
+from preqtorch.encoders import EncoderState
 
-# Define a simple character-level model for the Spanish phonetic transcription task
-class SimplePhoneticModel(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
-        super(SimplePhoneticModel, self).__init__()
-        self.embedding = nn.Embedding(input_size, hidden_size)
-        self.lstm = nn.LSTM(hidden_size, hidden_size, batch_first=True)
-        self.output_size = output_size
-        self.fc = nn.Linear(hidden_size, self.output_size)
 
-    def forward(self, x, target_in=None):
-        # Handle device placement in the forward method
-        device = next(self.parameters()).device
+class BatchLinear(torch.nn.Module):
+    def __init__(self, input_size=2, output_size=2):
+        super().__init__()
+        self.linear = torch.nn.Linear(input_size, output_size)
+        self.last_batch = None
 
-        # Ensure x is a tensor
-        if not isinstance(x, torch.Tensor):
-            if isinstance(x, int):
-                x = torch.tensor([x], dtype=torch.long, device=device)
-            elif isinstance(x, list):
-                x = torch.tensor(x, dtype=torch.long, device=device)
+    def forward(self, batch):
+        self.last_batch = batch
+        inputs, _ = batch
+        return self.linear(inputs.float())
 
-        # Move tensor to the correct device if needed
-        if hasattr(x, 'to'):
-            x = x.to(device)
 
-        # Ensure x has at least 2 dimensions [batch_size, seq_len]
-        if x.dim() == 1:
-            x = x.unsqueeze(0)  # Add batch dimension if missing
+class ScalarModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.tensor(0.0))
 
-        # Ensure indices are within bounds
-        input_size = self.embedding.num_embeddings
-        x = torch.clamp(x, 0, input_size - 1)
+    def forward(self, batch):
+        inputs, _ = batch
+        return inputs * self.weight
 
-        # x shape: [batch_size, seq_len]
-        embedded = self.embedding(x)
-        # embedded shape: [batch_size, seq_len, hidden_size]
-        lstm_out, _ = self.lstm(embedded)
-        # lstm_out shape: [batch_size, seq_len, hidden_size]
-        output = self.fc(lstm_out)
-        # output shape: [batch_size, seq_len, output_size]
 
-        # Ensure output has 3 dimensions [batch_size, seq_len, output_size]
-        if output.dim() == 2:
-            output = output.unsqueeze(1)  # Add sequence dimension if missing
+def zero_scalar_model(model):
+    with torch.no_grad():
+        model.weight.zero_()
+    return model
 
-        return output
 
-# Define a base dataset for the Spanish phonetic transcription task
-class BaseSpanishPhoneticDataset(Dataset):
-    def __init__(self, file_path, max_samples=1000):
-        self.data = []
-        self.char_to_idx = {'<pad>': 0, '<bos>': 1}
-        self.phoneme_to_idx = {'<pad>': 0, '<bos>': 1}
+def negative_output_loss(batch, output):
+    return -output
 
-        # Read the data file
-        with open(file_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
 
-        # Limit the number of samples for faster testing
-        lines = lines[:max_samples]
+class RecordingReplay(Replay):
+    def __init__(self, dataset, collate_fn=None):
+        super().__init__(dataset, collate_fn)
+        self.updated_indices = []
+        self.sample_calls = 0
 
-        # Process each line
-        for line in lines:
-            parts = line.strip().split('\t')
-            if len(parts) == 2:
-                word, phonemes = parts
+    def update(self, new_indices):
+        self.updated_indices.append(list(new_indices))
 
-                # Create character indices for the word
-                for char in word:
-                    if char not in self.char_to_idx:
-                        self.char_to_idx[char] = len(self.char_to_idx)
+    def sample(self):
+        self.sample_calls += 1
+        return []
 
-                # Create phoneme indices
-                phoneme_list = phonemes.split()
-                for phoneme in phoneme_list:
-                    if phoneme not in self.phoneme_to_idx:
-                        self.phoneme_to_idx[phoneme] = len(self.phoneme_to_idx)
 
-                self.data.append((word, phoneme_list))
+class VariableBatchSampler:
+    def __iter__(self):
+        yield [2, 0]
+        yield [1]
 
     def __len__(self):
-        return len(self.data)
-
-    def _get_tensors(self, idx):
-        word, phonemes = self.data[idx]
-
-        # Convert word to tensor of indices
-        word_indices = [1]+[self.char_to_idx.get(char, 0) for char in word]
-        word_tensor = torch.tensor(word_indices, dtype=torch.long)
-
-        # Convert phonemes to tensor of indices
-        phoneme_indices = [self.phoneme_to_idx.get(phoneme, 0) for phoneme in phonemes]+[1]
-        phoneme_tensor = torch.tensor(phoneme_indices, dtype=torch.long)
-
-        return word_tensor, phoneme_tensor
-
-# Dataset that returns (inputs, targets) - Format 1
-class SpanishPhoneticDatasetFormat1(BaseSpanishPhoneticDataset):
-    def __getitem__(self, idx):
-        word_tensor, phoneme_tensor = self._get_tensors(idx)
-        return word_tensor, phoneme_tensor
-
-# Dataset that returns (inputs, targets, mask) - Format 2
-class SpanishPhoneticDatasetFormat2(BaseSpanishPhoneticDataset):
-    def __getitem__(self, idx):
-        word_tensor, phoneme_tensor = self._get_tensors(idx)
-        # Create a mask for the target (all True in this case)
-        mask = torch.ones_like(phoneme_tensor, dtype=torch.bool)
-        return word_tensor, phoneme_tensor, mask
-
-# Dataset that returns (inputs, targets, input_mask, target_mask) - Format 3
-class SpanishPhoneticDatasetFormat3(BaseSpanishPhoneticDataset):
-    def __getitem__(self, idx):
-        word_tensor, phoneme_tensor = self._get_tensors(idx)
-        # Create masks for both input and target (all True in this case)
-        output_mask = torch.ones_like(phoneme_tensor, dtype=torch.bool)
-        target_mask = torch.ones_like(phoneme_tensor, dtype=torch.bool)
-        return word_tensor, phoneme_tensor, output_mask, target_mask
-
-# For backward compatibility
-SpanishPhoneticDataset = SpanishPhoneticDatasetFormat2
-
-# Collate function for Format 1: (inputs, targets)
-def collate_fn_format1(batch):
-    # Sort the batch by word length (descending)
-    batch = list(batch)
-    batch.sort(key=lambda x: len(x[0]), reverse=True)
-
-    # Get the data
-    words, phonemes = zip(*batch)
-
-    # Pad the sequences
-    words_padded = nn.utils.rnn.pad_sequence(words, batch_first=True)
-    phonemes_padded = nn.utils.rnn.pad_sequence(phonemes, batch_first=True)
-
-    # Ensure both tensors have the same size
-    max_len = max(words_padded.size(1), phonemes_padded.size(1))
-
-    # Pad words if needed
-    if words_padded.size(1) < max_len:
-        padding = torch.zeros(words_padded.size(0), max_len - words_padded.size(1), dtype=words_padded.dtype, device=words_padded.device)
-        words_padded = torch.cat([words_padded, padding], dim=1)
-
-    # Pad phonemes if needed
-    if phonemes_padded.size(1) < max_len:
-        padding = torch.zeros(phonemes_padded.size(0), max_len - phonemes_padded.size(1), dtype=phonemes_padded.dtype, device=phonemes_padded.device)
-        phonemes_padded = torch.cat([phonemes_padded, padding], dim=1)
-
-    return words_padded, phonemes_padded
-
-# Collate function for Format 2: (inputs, targets, mask)
-def collate_fn_format2(batch):
-    # Sort the batch by word length (descending)
-    batch = list(batch)
-    batch.sort(key=lambda x: len(x[0]), reverse=True)
-
-    # Get the data
-    words, phonemes, masks = zip(*batch)
-
-    # Pad the sequences
-    words_padded = nn.utils.rnn.pad_sequence(words, batch_first=True)
-    phonemes_padded = nn.utils.rnn.pad_sequence(phonemes, batch_first=True)
-    masks_padded = nn.utils.rnn.pad_sequence(masks, batch_first=True)
-
-    # Ensure both tensors have the same size
-    max_len = max(words_padded.size(1), phonemes_padded.size(1))
-
-    # Pad words if needed
-    if words_padded.size(1) < max_len:
-        padding = torch.zeros(words_padded.size(0), max_len - words_padded.size(1), dtype=words_padded.dtype, device=words_padded.device)
-        words_padded = torch.cat([words_padded, padding], dim=1)
-
-    # Pad phonemes if needed
-    if phonemes_padded.size(1) < max_len:
-        padding = torch.zeros(phonemes_padded.size(0), max_len - phonemes_padded.size(1), dtype=phonemes_padded.dtype, device=phonemes_padded.device)
-        phonemes_padded = torch.cat([phonemes_padded, padding], dim=1)
-
-    # Also pad the masks to match phonemes
-    if masks_padded.size(1) < max_len:
-        mask_padding = torch.zeros(masks_padded.size(0), max_len - masks_padded.size(1), dtype=masks_padded.dtype, device=masks_padded.device)
-        masks_padded = torch.cat([masks_padded, mask_padding], dim=1)
-
-    return words_padded, phonemes_padded, masks_padded
-
-# Collate function for Format 3: (inputs, targets, input_mask, target_mask)
-def collate_fn_format3(batch):
-    # Sort the batch by word length (descending)
-    batch = list(batch)
-    batch.sort(key=lambda x: len(x[0]), reverse=True)
-
-    # Get the data
-    words, phonemes, input_masks, target_masks = zip(*batch)
-
-    # Pad the sequences
-    words_padded = nn.utils.rnn.pad_sequence(words, batch_first=True)
-    phonemes_padded = nn.utils.rnn.pad_sequence(phonemes, batch_first=True)
-    output_masks_padded = nn.utils.rnn.pad_sequence(input_masks, batch_first=True)
-    target_masks_padded = nn.utils.rnn.pad_sequence(target_masks, batch_first=True)
-
-    # Ensure both tensors have the same size
-    max_len = max(words_padded.size(1), phonemes_padded.size(1))
-
-    # Pad words if needed
-    if words_padded.size(1) < max_len:
-        padding = torch.zeros(words_padded.size(0), max_len - words_padded.size(1), dtype=words_padded.dtype, device=words_padded.device)
-        words_padded = torch.cat([words_padded, padding], dim=1)
-
-    # Pad phonemes if needed
-    if phonemes_padded.size(1) < max_len:
-        padding = torch.zeros(phonemes_padded.size(0), max_len - phonemes_padded.size(1), dtype=phonemes_padded.dtype, device=phonemes_padded.device)
-        phonemes_padded = torch.cat([phonemes_padded, padding], dim=1)
-
-    # Also pad the target masks to match phonemes
-    if target_masks_padded.size(1) < max_len:
-        mask_padding = torch.zeros(target_masks_padded.size(0), max_len - target_masks_padded.size(1), dtype=target_masks_padded.dtype, device=target_masks_padded.device)
-        target_masks_padded = torch.cat([target_masks_padded, mask_padding], dim=1)
-
-    # Also pad the input masks to match words
-    if output_masks_padded.size(1) < max_len:
-        mask_padding = torch.zeros(output_masks_padded.size(0), max_len - output_masks_padded.size(1), dtype=output_masks_padded.dtype, device=output_masks_padded.device)
-        output_masks_padded = torch.cat([output_masks_padded, mask_padding], dim=1)
+        return 2
 
 
-    return words_padded, phonemes_padded, output_masks_padded, target_masks_padded
+class SimpleIterableDataset(IterableDataset):
+    def __iter__(self):
+        yield torch.ones(2), torch.tensor(0)
 
-# For backward compatibility
-collate_fn = collate_fn_format2
 
-# Custom loss function
-def phonetic_loss_fn(outputs, targets, output_mask, target_mask):
-    # Remove debug print statements for clarity
+def code_length_loss(batch, output):
+    _, targets = batch
+    return torch.nn.functional.cross_entropy(output, targets, reduction="none")
 
-    # Ensure outputs is a tensor
-    if not isinstance(outputs, torch.Tensor):
-        raise TypeError(f"Expected outputs to be a tensor, got {type(outputs)}")
 
-    # Ensure targets is a tensor
-    if not isinstance(targets, torch.Tensor):
-        if isinstance(targets, tuple) and len(targets) > 0:
-            targets = targets[0]  # Take the first element if it's a tuple
-            if not isinstance(targets, torch.Tensor):
-                raise TypeError(f"Expected targets[0] to be a tensor, got {type(targets)}")
-        else:
-            raise TypeError(f"Expected targets to be a tensor, got {type(targets)}")
+def make_loader(batch_size=2):
+    inputs = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [0.0, 0.0]])
+    targets = torch.tensor([0, 1, 0, 1])
+    return DataLoader(TensorDataset(inputs, targets), batch_size=batch_size, shuffle=False)
 
-    # Apply masks to outputs and targets
-    masked_outputs = outputs[output_mask]
-    masked_targets = targets[target_mask]
 
-    return F.cross_entropy(masked_outputs, masked_targets, reduction='none')
+def test_encoder_result_fields():
+    result = EncoderResult(model="m", code_length=1.0, history=[1, 2, 3])
+    assert result.model == "m"
+    assert result.code_length == 1.0
+    assert result.history == [1, 2, 3]
 
-def main():
-    # Set random seed for reproducibility
-    torch.manual_seed(42)
+    replay_result = EncoderResult(model="m", code_length=1.0, history=[], ema_params={}, beta="b", replay="r")
+    assert replay_result.replay == "r"
 
-    # Test all three dataset formats
-    test_format1()
-    test_format2()
-    test_format3()
 
-    # Test default encoding function
-    test_default_encoding_fn()
+def test_block_encoder_uses_model_batch_and_loss_fn_contract():
+    model_class = ModelClass(BatchLinear, device="cpu")
+    encoder = BlockEncoder(model_class=model_class, device="cpu")
+    loader = make_loader()
 
-    # Test custom encoding function passed directly to encode()
-    test_custom_encoding_fn_in_encode()
-
-    # Test MIREncoder with different beta and EMA configurations
-    test_mir_encoder_without_beta()
-    test_mir_encoder_without_ema()
-    test_mir_encoder_without_both()
-
-def test_format1():
-    """Test encoders with Format 1: (inputs, targets)"""
-    # Define data_path inside the test function
-    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spa_latn_la_broad.tsv")
-    print("\n" + "="*80)
-    print("TESTING FORMAT 1: (inputs, targets)")
-    print("="*80)
-
-    # Create the dataset
-    dataset = SpanishPhoneticDatasetFormat1(data_path, max_samples=500)
-
-    print(f"Dataset size: {len(dataset)}")
-    print(f"Number of characters: {len(dataset.char_to_idx)}")
-    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
-
-    # Test BlockEncoder
-    print("\nTesting BlockEncoder with Format 1...")
-    model_class = ModelClass(
-        model=SimplePhoneticModel,
-        device='cpu',
-        kwargs={
-            'input_size': len(dataset.char_to_idx),
-            'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
-        }
-    )
-    block_encoder = BlockEncoder(
-        model_class=model_class,
-        loss_fn=phonetic_loss_fn
-    )
-
-    # Encode with BlockEncoder (one-shot approach)
-    model, code_length, code_length_history = block_encoder.encode(
-        dataset=dataset,
-        set_name="Spanish Phonetic (Block, Format 1)",
-        epochs=2,
-        learning_rate=0.001,
-        batch_size=32,
+    result = encoder.encode(
+        train_dataloader=[loader],
+        eval_dataloaders=[loader],
+        set_name="opaque batches",
         seed=42,
-        stop_points=[0.5, 1.0],
-        patience=5,
-        collate_fn=collate_fn_format1,
-        use_device_handling=False
+        loss_fn=code_length_loss,
+        epochs=1,
+        patience=1,
     )
 
-    print(f"Block Encoder (Format 1) - Code length: {code_length}.")
+    assert isinstance(result, EncoderResult)
+    assert result.code_length > 0
+    assert len(result.history) == len(loader)
 
-    # Test MIREncoder
-    print("\nTesting MIREncoder with Format 1...")
-    model_class = ModelClass(
-        model=SimplePhoneticModel,
-        device='cpu',
-        kwargs={
-            'input_size': len(dataset.char_to_idx),
-            'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
-        }
-    )
-    mir_encoder = MIREncoder(
-        model_class=model_class,
-        loss_fn=phonetic_loss_fn
-    )
 
-    # Encode with MIREncoder (one-shot approach)
-    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
-        dataset=dataset,
-        set_name="Spanish Phonetic (MIR, Format 1)",
-        n_replay_samples=2,
-        learning_rate=0.001,
-        batch_size=32,
-        seed=42,
-        alpha=0.1,
-        collate_fn=collate_fn_format1,
+def test_block_calculate_code_length_passes_whole_batch_to_model_and_loss():
+    model = BatchLinear()
+    encoder = BlockEncoder(ModelClass(BatchLinear, device="cpu"), device="cpu")
+    batch = next(iter(make_loader()))
+    seen = {}
+
+    def loss_fn(batch_arg, output):
+        seen["batch"] = batch_arg
+        seen["output"] = output
+        return code_length_loss(batch_arg, output)
+
+    code_lengths, returned_batch, output = encoder.calculate_code_length(
+        model,
+        batch,
+        loss_fn=loss_fn,
         use_device_handling=False,
-        use_beta=True,
-        use_ema=True
     )
 
-    print(f"MIR Encoder (Format 1) - Code length: {code_length}.")
+    assert model.last_batch is batch
+    assert seen["batch"] is batch
+    assert seen["output"] is output
+    assert returned_batch is batch
+    assert code_lengths.shape == batch[1].shape
 
-def test_format2():
-    """Test encoders with Format 2: (inputs, targets, mask)"""
-    # Define data_path inside the test function
-    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spa_latn_la_broad.tsv")
-    print("\n" + "="*80)
-    print("TESTING FORMAT 2: (inputs, targets, mask)")
-    print("="*80)
 
-    # Create the dataset
-    dataset = SpanishPhoneticDatasetFormat2(data_path, max_samples=500)
-
-    print(f"Dataset size: {len(dataset)}")
-    print(f"Number of characters: {len(dataset.char_to_idx)}")
-    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
-
-    # Test BlockEncoder
-    print("\nTesting BlockEncoder with Format 2...")
-    model_class = ModelClass(
-        model=SimplePhoneticModel,
-        device='cpu',
-        kwargs={
-            'input_size': len(dataset.char_to_idx),
-            'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
-        }
+def test_block_encoder_uses_fresh_optimizer_for_each_weight_restart():
+    loader = DataLoader(
+        TensorDataset(torch.ones(1), torch.zeros(1)),
+        batch_size=1,
+        shuffle=False,
     )
-    block_encoder = BlockEncoder(
-        model_class=model_class,
-        loss_fn=phonetic_loss_fn
-    )
+    optimizers = []
 
-    # Test staged approach (initialize, step, finalize)
-    print("\nTesting BlockEncoder with staged approach (initialize, step, finalize)...")
-    # Initialize
-    state, train_chunks, eval_chunks, batch_size, shuffle, collate_fn_result = block_encoder.initialize(
-        dataset=dataset,
-        stop_points=[0.5, 1.0],
-        batch_size=32,
-        learning_rate=0.001,
+    def optimizer_fn(parameters, lr):
+        optimizer = torch.optim.SGD(parameters, lr=lr, momentum=0.9)
+        optimizers.append(optimizer)
+        return optimizer
+
+    encoder = BlockEncoder(
+        ModelClass(ScalarModel, device="cpu", init_func=zero_scalar_model),
+        device="cpu",
+        optimizer_fn=optimizer_fn,
+    )
+    result = encoder.encode(
+        train_dataloader=[loader, loader, loader],
+        eval_dataloaders=[loader, loader, loader],
+        set_name="optimizer restarts",
         seed=42,
-        shuffle=True,
-        collate_fn=collate_fn_format2
+        loss_fn=negative_output_loss,
+        learning_rate=1.0,
+        epochs=1,
+        patience=1,
     )
 
-    # Create dataloader for the first chunk
-    train_loader = DataLoader(train_chunks[0], batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn_format2)
+    assert len(optimizers) == 2
+    assert result.model.weight.item() == 1.0
 
-    # Step through batches
-    for batch in train_loader:
-        block_encoder.step(state, batch)
 
-    # Evaluate on the first chunk
-    eval_loader = DataLoader(eval_chunks[0], batch_size=batch_size, shuffle=False, collate_fn=collate_fn_format2)
-    block_encoder.eval_code_length(state, eval_loader)
+def test_mir_encoder_uses_model_batch_and_loss_fn_contract():
+    model_class = ModelClass(BatchLinear, device="cpu")
+    encoder = MIREncoder(model_class=model_class, device="cpu")
+    loader = make_loader(batch_size=2)
 
-    print(f"Block Encoder (staged approach, Format 2) - Code length: {state.code_length}.")
-
-    # Encode with BlockEncoder (one-shot approach)
-    model, code_length, code_length_history = block_encoder.encode(
-        dataset=dataset,
-        set_name="Spanish Phonetic (Block, Format 2)",
-        epochs=2,
-        learning_rate=0.001,
-        batch_size=32,
+    result = encoder.encode(
+        dataloader=loader,
+        set_name="opaque batches mir",
+        n_replay_samples=1,
+        loss_fn=code_length_loss,
+        learning_rate=1e-3,
         seed=42,
-        stop_points=[0.5, 1.0],
-        patience=5,
-        collate_fn=collate_fn_format2,
+        use_beta=False,
+        use_ema=False,
+    )
+
+    assert isinstance(result, EncoderResult)
+    assert isinstance(result.code_length, float)
+    assert result.code_length > 0
+    assert all(isinstance(value, float) for value in result.history)
+    assert len(result.history) == len(loader)
+    assert result.replay is not None
+
+
+def test_mir_encoder_updates_model_without_beta_or_ema():
+    loader = DataLoader(
+        TensorDataset(torch.ones(1), torch.zeros(1)),
+        batch_size=1,
+        shuffle=False,
+    )
+    encoder = MIREncoder(
+        ModelClass(ScalarModel, device="cpu", init_func=zero_scalar_model),
+        device="cpu",
+        optimizer_fn=lambda parameters, lr: torch.optim.SGD(parameters, lr=lr),
+    )
+
+    result = encoder.encode(
+        dataloader=loader,
+        set_name="plain optimizer update",
+        n_replay_samples=0,
+        loss_fn=negative_output_loss,
+        learning_rate=1.0,
+        use_beta=False,
+        use_ema=False,
+    )
+
+    assert result.model.weight.item() == 1.0
+
+
+def test_mir_encoder_preserves_source_batch_sampler():
+    inputs = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [0.0, 0.0]])
+    targets = torch.tensor([0, 1, 0, 1])
+    dataset = TensorDataset(inputs, targets)
+    sampler = SubsetRandomSampler(
+        [0, 2],
+        generator=torch.Generator().manual_seed(42),
+    )
+    loader = DataLoader(
+        dataset,
+        batch_sampler=BatchSampler(sampler, batch_size=2, drop_last=False),
+    )
+    encoder = MIREncoder(ModelClass(BatchLinear, device="cpu"), device="cpu")
+
+    result = encoder.encode(
+        dataloader=loader,
+        set_name="source batch sampler",
+        n_replay_samples=1,
+        loss_fn=code_length_loss,
+        learning_rate=1e-3,
+        seed=42,
+        use_beta=False,
+        use_ema=False,
+    )
+
+    assert len(result.history) == len(loader) == 1
+    assert sorted(result.replay.seen_indices) == [0, 2]
+
+
+def test_mir_encoder_preserves_source_drop_last():
+    inputs = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+    targets = torch.tensor([0, 1, 0])
+    dataset = TensorDataset(inputs, targets)
+    loader = DataLoader(dataset, batch_size=2, shuffle=False, drop_last=True)
+    encoder = MIREncoder(ModelClass(BatchLinear, device="cpu"), device="cpu")
+
+    result = encoder.encode(
+        dataloader=loader,
+        set_name="source drop_last",
+        n_replay_samples=1,
+        loss_fn=code_length_loss,
+        learning_rate=1e-3,
+        seed=42,
+        use_beta=False,
+        use_ema=False,
+    )
+
+    assert len(result.history) == len(loader) == 1
+    assert result.replay.seen_indices == [0, 1]
+
+
+def test_mir_encoder_delegates_variable_batches_to_custom_replay():
+    inputs = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+    targets = torch.tensor([0, 1, 0])
+    dataset = TensorDataset(inputs, targets)
+    loader = DataLoader(dataset, batch_sampler=VariableBatchSampler())
+    replay = RecordingReplay(dataset, collate_fn=loader.collate_fn)
+    encoder = MIREncoder(ModelClass(BatchLinear, device="cpu"), device="cpu")
+
+    result = encoder.encode(
+        dataloader=loader,
+        set_name="custom replay batches",
+        replay=replay,
+        loss_fn=code_length_loss,
+        learning_rate=1e-3,
+        seed=42,
+        use_beta=False,
+        use_ema=False,
+    )
+
+    assert result.replay is replay
+    assert len(result.history) == len(loader) == 2
+    assert replay.updated_indices == [[2, 0], [1]]
+    assert replay.sample_calls == len(loader)
+
+
+def test_mir_encoder_rejects_unbatched_source_dataloader():
+    dataset = TensorDataset(torch.ones(1, 2), torch.zeros(1, dtype=torch.long))
+    loader = DataLoader(dataset, batch_size=None)
+    replay = RecordingReplay(dataset, collate_fn=loader.collate_fn)
+    encoder = MIREncoder(ModelClass(BatchLinear, device="cpu"), device="cpu")
+
+    with pytest.raises(ValueError, match="must use automatic or custom batching"):
+        encoder.encode(
+            dataloader=loader,
+            set_name="unbatched source",
+            replay=replay,
+            loss_fn=code_length_loss,
+            use_beta=False,
+            use_ema=False,
+        )
+
+
+def test_mir_encoder_rejects_iterable_dataset():
+    loader = DataLoader(SimpleIterableDataset(), batch_size=1)
+    encoder = MIREncoder(ModelClass(BatchLinear, device="cpu"), device="cpu")
+
+    with pytest.raises(TypeError, match="map-style dataset"):
+        encoder.encode(
+            dataloader=loader,
+            set_name="iterable source",
+            n_replay_samples=1,
+            loss_fn=code_length_loss,
+            use_beta=False,
+            use_ema=False,
+        )
+
+
+def test_mir_calculate_code_length_passes_whole_batch_to_model_and_loss():
+    model = BatchLinear()
+    encoder = MIREncoder(ModelClass(BatchLinear, device="cpu"), device="cpu")
+    batch = next(iter(make_loader()))
+    seen = {}
+
+    def loss_fn(batch_arg, output):
+        seen["batch"] = batch_arg
+        seen["output"] = output
+        return code_length_loss(batch_arg, output)
+
+    state = EncoderState(
+        model=model,
+        optim=None,
+        beta=None,
+        beta_optim=None,
+        ema_params=None,
+        trained_params=None,
+        loss_fn=loss_fn,
+    )
+
+    code_lengths, returned_batch, output = encoder.calculate_code_length(
+        state,
+        batch,
         use_device_handling=False,
-
     )
 
-    print(f"Block Encoder (Format 2) - Code length: {code_length}.")
+    assert model.last_batch is batch
+    assert seen["batch"] is batch
+    assert seen["output"] is output
+    assert returned_batch is batch
+    assert code_lengths.shape == batch[1].shape
 
-    # Test MIREncoder
-    print("\nTesting MIREncoder with Format 2...")
-    model_class = ModelClass(
-        model=SimplePhoneticModel,
-        device='cpu',
-        kwargs={
-            'input_size': len(dataset.char_to_idx),
-            'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
-        }
-    )
-    mir_encoder = MIREncoder(
-        model_class=model_class,
-        loss_fn=phonetic_loss_fn
-    )
 
-    # Encode with MIREncoder (one-shot approach)
-    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
-        dataset=dataset,
-        set_name="Spanish Phonetic (MIR, Format 2)",
-        n_replay_samples=2,
-        learning_rate=0.001,
-        batch_size=32,
-        seed=42,
-        alpha=0.1,
-        collate_fn=collate_fn_format2,
-        use_device_handling=False,
-        use_beta=True,
-        use_ema=True
-    )
+def test_loss_fn_is_required():
+    encoder = BlockEncoder(ModelClass(BatchLinear, device="cpu"), device="cpu")
+    loader = make_loader()
 
-    print(f"MIR Encoder (Format 2) - Code length: {code_length}.")
-
-def test_format3():
-    """Test encoders with Format 3: (inputs, targets, input_mask, target_mask)"""
-    # Define data_path inside the test function
-    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spa_latn_la_broad.tsv")
-    print("\n" + "="*80)
-    print("TESTING FORMAT 3: (inputs, targets, input_mask, target_mask)")
-    print("="*80)
-
-    # Create the dataset
-    dataset = SpanishPhoneticDatasetFormat3(data_path, max_samples=500)
-
-    print(f"Dataset size: {len(dataset)}")
-    print(f"Number of characters: {len(dataset.char_to_idx)}")
-    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
-
-    # Test BlockEncoder
-    print("\nTesting BlockEncoder with Format 3...")
-    model_class = ModelClass(
-        model=SimplePhoneticModel,
-        device='cpu',
-        kwargs={
-            'input_size': len(dataset.char_to_idx),
-            'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
-        }
-    )
-    block_encoder = BlockEncoder(
-        model_class=model_class,
-        loss_fn=phonetic_loss_fn
-    )
-
-    # Encode with BlockEncoder (one-shot approach)
-    model, code_length, code_length_history = block_encoder.encode(
-        dataset=dataset,
-        set_name="Spanish Phonetic (Block, Format 3)",
-        epochs=2,
-        learning_rate=0.001,
-        batch_size=32,
-        seed=42,
-        stop_points=[0.5, 1.0],
-        patience=5,
-        collate_fn=collate_fn_format3,
-        use_device_handling=False
-    )
-
-    print(f"Block Encoder (Format 3) - Code length: {code_length}.")
-
-    # Test MIREncoder
-    print("\nTesting MIREncoder with Format 3...")
-    model_class = ModelClass(
-        model=SimplePhoneticModel,
-        device='cpu',
-        kwargs={
-            'input_size': len(dataset.char_to_idx),
-            'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
-        }
-    )
-    mir_encoder = MIREncoder(
-        model_class=model_class,
-        loss_fn=phonetic_loss_fn
-    )
-
-    # Encode with MIREncoder (one-shot approach)
-    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
-        dataset=dataset,
-        set_name="Spanish Phonetic (MIR, Format 3)",
-        n_replay_samples=2,
-        learning_rate=0.001,
-        batch_size=32,
-        seed=42,
-        alpha=0.1,
-        collate_fn=collate_fn_format3,
-        use_device_handling=False,
-        use_beta=True,
-        use_ema=True
-    )
-
-    print(f"MIR Encoder (Format 3) - Code length: {code_length}.")
-
-def test_default_encoding_fn():
-    """Test encoders with the default encoding function"""
-    # Define data_path inside the test function
-    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spa_latn_la_broad.tsv")
-    print("\n" + "="*80)
-    print("TESTING DEFAULT ENCODING FUNCTION")
-    print("="*80)
-
-    # Create the dataset
-    dataset = SpanishPhoneticDatasetFormat3(data_path, max_samples=500)
-
-    print(f"Dataset size: {len(dataset)}")
-    print(f"Number of characters: {len(dataset.char_to_idx)}")
-    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
-
-    # Test BlockEncoder with default encoding function
-    print("\nTesting BlockEncoder with default encoding function...")
-    model_class = ModelClass(
-        model=SimplePhoneticModel,
-        device='cpu',
-        kwargs={
-            'input_size': len(dataset.char_to_idx),
-            'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
-        }
-    )
-    # Note: No loss_fn provided, so it will use the default encoding function
-    block_encoder = BlockEncoder(
-        model_class=model_class
-    )
-
-    # Encode with BlockEncoder (one-shot approach)
-    model, code_length, code_length_history = block_encoder.encode(
-        dataset=dataset,
-        set_name="Spanish Phonetic (Block, Default Encoding)",
-        epochs=2,
-        learning_rate=0.001,
-        batch_size=32,
-        seed=42,
-        stop_points=[0.5, 1.0],
-        patience=5,
-        collate_fn=collate_fn_format3,
-        use_device_handling=False
-    )
-
-    print(f"Block Encoder (Default Encoding) - Code length: {code_length}.")
-
-    # Test MIREncoder with default encoding function
-    print("\nTesting MIREncoder with default encoding function...")
-    model_class = ModelClass(
-        model=SimplePhoneticModel,
-        device='cpu',
-        kwargs={
-            'input_size': len(dataset.char_to_idx),
-            'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
-        }
-    )
-    # Note: No loss_fn provided, so it will use the default encoding function
-    mir_encoder = MIREncoder(
-        model_class=model_class
-    )
-
-    # Encode with MIREncoder (one-shot approach)
-    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
-        dataset=dataset,
-        set_name="Spanish Phonetic (MIR, Default Encoding)",
-        n_replay_samples=2,
-        learning_rate=0.001,
-        batch_size=32,
-        seed=42,
-        alpha=0.1,
-        collate_fn=collate_fn_format3,
-        use_device_handling=False,
-        use_beta=True,
-        use_ema=True
-    )
-
-    print(f"MIR Encoder (Default Encoding) - Code length: {code_length}.")
-
-def test_custom_encoding_fn_in_encode():
-    """Test encoders with custom encoding function passed directly to encode()"""
-    # Define data_path inside the test function
-    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spa_latn_la_broad.tsv")
-    print("\n" + "="*80)
-    print("TESTING CUSTOM ENCODING FUNCTION PASSED TO ENCODE()")
-    print("="*80)
-
-    # Create the dataset
-    dataset = SpanishPhoneticDatasetFormat3(data_path, max_samples=500)
-
-    print(f"Dataset size: {len(dataset)}")
-    print(f"Number of characters: {len(dataset.char_to_idx)}")
-    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
-
-    # Define a custom encoding function with a multiplier to make it different from the default
-    def custom_encoding_fn(outputs, targets, output_mask, target_mask):
-        # Apply masks to outputs and targets
-        masked_outputs = outputs[output_mask]
-        masked_targets = targets[target_mask]
-        # Use a multiplier of 1.5 to make it different from the default
-        return 1.5 * F.cross_entropy(masked_outputs, masked_targets, reduction='none')/torch.log(torch.tensor(2.0, device=outputs.device))
-
-    # Test BlockEncoder with custom encoding function passed to encode()
-    print("\nTesting BlockEncoder with custom encoding function passed to encode()...")
-    model_class = ModelClass(
-        model=SimplePhoneticModel,
-        device='cpu',
-        kwargs={
-            'input_size': len(dataset.char_to_idx),
-            'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
-        }
-    )
-    # Note: No loss_fn provided during initialization
-    block_encoder = BlockEncoder(
-        model_class=model_class
-    )
-
-    # Encode with BlockEncoder (one-shot approach) with custom encoding function
-    model, code_length, code_length_history = block_encoder.encode(
-        dataset=dataset,
-        set_name="Spanish Phonetic (Block, Custom Encoding)",
-        epochs=2,
-        learning_rate=0.001,
-        batch_size=32,
-        seed=42,
-        stop_points=[0.5, 1.0],
-        patience=5,
-        collate_fn=collate_fn_format3,
-        use_device_handling=False,
-        encoding_fn=custom_encoding_fn  # Pass custom encoding function here
-    )
-
-    print(f"Block Encoder (Custom Encoding) - Code length: {code_length}.")
-
-    # Test MIREncoder with custom encoding function passed to encode()
-    print("\nTesting MIREncoder with custom encoding function passed to encode()...")
-    model_class = ModelClass(
-        model=SimplePhoneticModel,
-        device='cpu',
-        kwargs={
-            'input_size': len(dataset.char_to_idx),
-            'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
-        }
-    )
-    # Note: No loss_fn provided during initialization
-    mir_encoder = MIREncoder(
-        model_class=model_class
-    )
-
-    # Encode with MIREncoder (one-shot approach) with custom encoding function
-    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
-        dataset=dataset,
-        set_name="Spanish Phonetic (MIR, Custom Encoding)",
-        n_replay_samples=2,
-        learning_rate=0.001,
-        batch_size=32,
-        seed=42,
-        alpha=0.1,
-        collate_fn=collate_fn_format3,
-        use_device_handling=False,
-        use_beta=True,
-        use_ema=True,
-        encoding_fn=custom_encoding_fn  # Pass custom encoding function here
-    )
-
-    print(f"MIR Encoder (Custom Encoding) - Code length: {code_length}.")
-
-def test_mir_encoder_without_beta():
-    """Test MIREncoder without beta (use_beta=False, use_ema=True)"""
-    # Define data_path inside the test function
-    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spa_latn_la_broad.tsv")
-    print("\n" + "="*80)
-    print("TESTING MIR ENCODER WITHOUT BETA (use_beta=False, use_ema=True)")
-    print("="*80)
-
-    # Create the dataset
-    dataset = SpanishPhoneticDatasetFormat3(data_path, max_samples=500)
-
-    print(f"Dataset size: {len(dataset)}")
-    print(f"Number of characters: {len(dataset.char_to_idx)}")
-    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
-
-    # Test MIREncoder without beta
-    print("\nTesting MIREncoder without beta...")
-    model_class = ModelClass(
-        model=SimplePhoneticModel,
-        device='cpu',
-        kwargs={
-            'input_size': len(dataset.char_to_idx),
-            'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
-        }
-    )
-    mir_encoder = MIREncoder(
-        model_class=model_class,
-        loss_fn=phonetic_loss_fn
-    )
-
-    # Encode with MIREncoder (one-shot approach) without beta
-    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
-        dataset=dataset,
-        set_name="Spanish Phonetic (MIR, Without Beta)",
-        n_replay_samples=2,
-        learning_rate=0.001,
-        batch_size=32,
-        seed=42,
-        alpha=0.1,
-        collate_fn=collate_fn_format3,
-        use_device_handling=False,
-        use_beta=False,  # Disable beta
-        use_ema=True     # Keep EMA enabled
-    )
-
-    print(f"MIR Encoder (Without Beta) - Code length: {code_length}.")
-
-def test_mir_encoder_without_ema():
-    """Test MIREncoder without EMA (use_beta=True, use_ema=False)"""
-    # Define data_path inside the test function
-    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spa_latn_la_broad.tsv")
-    print("\n" + "="*80)
-    print("TESTING MIR ENCODER WITHOUT EMA (use_beta=True, use_ema=False)")
-    print("="*80)
-
-    # Create the dataset
-    dataset = SpanishPhoneticDatasetFormat3(data_path, max_samples=500)
-
-    print(f"Dataset size: {len(dataset)}")
-    print(f"Number of characters: {len(dataset.char_to_idx)}")
-    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
-
-    # Test MIREncoder without EMA
-    print("\nTesting MIREncoder without EMA...")
-    model_class = ModelClass(
-        model=SimplePhoneticModel,
-        device='cpu',
-        kwargs={
-            'input_size': len(dataset.char_to_idx),
-            'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
-        }
-    )
-    mir_encoder = MIREncoder(
-        model_class=model_class,
-        loss_fn=phonetic_loss_fn
-    )
-
-    # Encode with MIREncoder (one-shot approach) without EMA
-    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
-        dataset=dataset,
-        set_name="Spanish Phonetic (MIR, Without EMA)",
-        n_replay_samples=2,
-        learning_rate=0.001,
-        batch_size=32,
-        seed=42,
-        alpha=0.1,
-        collate_fn=collate_fn_format3,
-        use_device_handling=False,
-        use_beta=True,   # Keep beta enabled
-        use_ema=False    # Disable EMA
-    )
-
-    print(f"MIR Encoder (Without EMA) - Code length: {code_length}.")
-
-def test_mir_encoder_without_both():
-    """Test MIREncoder without both beta and EMA (use_beta=False, use_ema=False)"""
-    # Define data_path inside the test function
-    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spa_latn_la_broad.tsv")
-    print("\n" + "="*80)
-    print("TESTING MIR ENCODER WITHOUT BOTH BETA AND EMA (use_beta=False, use_ema=False)")
-    print("="*80)
-
-    # Create the dataset
-    dataset = SpanishPhoneticDatasetFormat3(data_path, max_samples=500)
-
-    print(f"Dataset size: {len(dataset)}")
-    print(f"Number of characters: {len(dataset.char_to_idx)}")
-    print(f"Number of phonemes: {len(dataset.phoneme_to_idx)}")
-
-    # Test MIREncoder without both beta and EMA
-    print("\nTesting MIREncoder without both beta and EMA...")
-    model_class = ModelClass(
-        model=SimplePhoneticModel,
-        device='cpu',
-        kwargs={
-            'input_size': len(dataset.char_to_idx),
-            'hidden_size': 64,
-            'output_size': len(dataset.phoneme_to_idx)
-        }
-    )
-    mir_encoder = MIREncoder(
-        model_class=model_class,
-        loss_fn=phonetic_loss_fn
-    )
-
-    # Encode with MIREncoder (one-shot approach) without both beta and EMA
-    model, code_length, code_length_history, ema_params, beta, replay_streams = mir_encoder.encode(
-        dataset=dataset,
-        set_name="Spanish Phonetic (MIR, Without Both)",
-        n_replay_samples=2,
-        learning_rate=0.001,
-        batch_size=32,
-        seed=42,
-        alpha=0.1,
-        collate_fn=collate_fn_format3,
-        use_device_handling=False,
-        use_beta=False,  # Disable beta
-        use_ema=False    # Disable EMA
-    )
-
-    print(f"MIR Encoder (Without Both Beta and EMA) - Code length: {code_length}.")
-
-if __name__ == "__main__":
-    main()
+    try:
+        encoder.encode([loader], [loader], "missing loss", seed=42)
+    except ValueError as exc:
+        assert "loss_fn" in str(exc)
+    else:
+        raise AssertionError("Expected loss_fn requirement to raise ValueError")

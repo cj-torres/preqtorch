@@ -10,10 +10,21 @@ class SimpleModel(nn.Module):
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, output_size)
 
-    def forward(self, x):
+    def forward(self, batch):
+        x, _ = batch
         x = torch.relu(self.fc1(x))
         x = self.fc2(x)
         return x
+
+
+class ModelWithOneDimensionalParameter(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.scale = nn.Parameter(torch.zeros(4))
+        self.projection = nn.Linear(4, 2)
+
+    def forward(self, batch):
+        return self.projection(batch * self.scale)
 
 def test_model_class_default_initialization():
     """Test if ModelClass properly initializes models with default initialization."""
@@ -35,18 +46,22 @@ def test_model_class_default_initialization():
     assert isinstance(model, SimpleModel)
     
     # Check if parameters are initialized (not all zeros)
-    for param in model.parameters():
-        # Parameters should not be all zeros after default initialization
-        assert not torch.all(param == 0).item()
-        
-        # Check if weight matrices are initialized with xavier_uniform
-        if param.dim() > 1:  # Weight matrices
+    for name, param in model.named_parameters():
+        if name.rsplit('.', 1)[-1] == 'bias':
+            assert torch.all(param == 0).item()
+        else:
+            assert not torch.all(param == 0).item()
+
+        if param.dim() > 1:
             # Xavier uniform keeps values in a reasonable range
             assert torch.max(torch.abs(param)).item() < 1.0
-            
-        # Check if bias vectors are initialized to zeros
-        elif 'bias' in str(param):
-            assert torch.all(param == 0).item()
+
+
+def test_model_class_distinguishes_biases_from_other_one_dimensional_parameters():
+    model = ModelClass(ModelWithOneDimensionalParameter, device='cpu').initialize()
+
+    assert torch.all(model.projection.bias == 0).item()
+    assert not torch.all(model.scale == 0).item()
 
 def test_model_class_custom_initialization():
     """Test if ModelClass properly uses custom initialization function."""

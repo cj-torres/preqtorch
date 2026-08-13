@@ -1,8 +1,4 @@
 import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, Subset
-from copy import deepcopy
-import os, random
 
 
 class ModelClass:
@@ -82,12 +78,12 @@ class ModelClass:
         Returns:
             torch.nn.Module: The initialized model
         """
-        # Apply xavier uniform initialization to all parameters
-        for param in model.parameters():
-            if param.dim() > 1:  # Only apply to weight matrices, not bias vectors
-                torch.nn.init.xavier_uniform_(param)
-            elif 'bias' in str(param):  # bias vectors init zero
+        for name, param in model.named_parameters():
+            parameter_name = name.rsplit('.', 1)[-1]
+            if parameter_name == 'bias':
                 torch.nn.init.zeros_(param)
-            else:  # else uniform initialization, even on [-1, 1]
+            elif param.dim() > 1:
+                torch.nn.init.xavier_uniform_(param)
+            else:
                 torch.nn.init.uniform_(param, a=-1.0, b=1.0)
         return model

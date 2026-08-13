@@ -1,204 +1,218 @@
 # PreqTorch
 
-A PyTorch-based library for calculating the prequential codelength of datasets. This toolkit allows for calculating the stochastic complexity of a dataset given it and a model class.
-
-## Overview
-
-PreqTorch provides tools for prequential encoding in PyTorch. Prequential encoding is a technique for evaluating datasets in an online learning setting, where the model is updated after each prediction.
-
-The library includes:
-- Prequential encoders (BlockEncoder, MIREncoder)
+PreqTorch is a PyTorch package for running prequential code-length experiments with user-defined data formats, models, and loss functions.
 
 ## Installation
-
-### From PyPI
 
 ```bash
 pip install preqtorch
 ```
 
-### From Source
+For local development:
 
 ```bash
 git clone https://github.com/cj-torres/preqtorch.git
 cd preqtorch
-pip install -e .
+python -m pip install -e ".[dev]"
+python -m pytest
 ```
 
 ## Requirements
 
-PreqTorch has the following requirements:
-- Python 3.6+
-- PyTorch 1.7+
-- NumPy
+- Python 3.11+
+- PyTorch 2.0+ (required for `torch.func`)
 
-
-# Usage
-
-I built this package to stop myself from rewriting the same prequential encoding process over and over. For this reason, the package wraps your dataset, model, and if necessary, a collate function and encoding (loss) function.
-
-The rest of the document will review the required formats for each of these. In my first iteration I've tried to strike a balance between flexibility and brevity.
-
-### Dataset formatting
-
-For PreqTorch to work properly, your datasets must:
-
-1. Be organized as tuples of tensors or tuples of tuples including tensors
-2. Return data in one of the following formats:
-   - `(inputs, targets)` - Basic format without masks
-   - `(inputs, targets, mask)` - Format with a shared mask for both model outputs and targets
-   - `(inputs, targets, output_mask, target_mask)` - Format with separate masks for outputs and targets
-3. Be compatible with PyTorch's Dataset class
-
-### Collate Function
-
-When using PreqTorch encoders, you may provide your own collate function at creation time. This function should:
-
-- Take a batch of samples and combine them into a single batch
-- Return data in one of the supported formats:
-  - `(inputs, targets)`
-  - `(inputs, targets, mask)` - shared mask for both model outputs and targets
-  - `(inputs, targets, output_mask, target_mask)` - separate masks for outputs and targets
-- Handle any specific requirements of your dataset
-
-Examples of collate functions for different dataset formats:
+## Public API
 
 ```python
-# Basic collate function (inputs, targets)
-def basic_collate_fn(batch):
-    # Unpack the batch
-    inputs = [item[0] for item in batch]
-    targets = [item[1] for item in batch]
-
-    # Stack inputs and targets into tensors
-    inputs = torch.stack(inputs)
-    targets = torch.stack(targets)
-
-    return inputs, targets
-
-# Collate function with shared mask (inputs, targets, mask)
-def masked_collate_fn(batch):
-    # Unpack the batch
-    inputs = [item[0] for item in batch]
-    targets = [item[1] for item in batch]
-
-    # Create or extract masks (example: mask based on non-zero values)
-    masks = [torch.ones_like(item[1], dtype=torch.bool) for item in batch]
-
-    # Stack inputs, targets, and masks into tensors
-    inputs = torch.stack(inputs)
-    targets = torch.stack(targets)
-    masks = torch.stack(masks)
-
-    return inputs, targets, masks
-
-# Collate function with separate masks (inputs, targets, output_mask, target_mask)
-def separate_masks_collate_fn(batch):
-    # Unpack the batch
-    inputs = [item[0] for item in batch]
-    targets = [item[1] for item in batch]
-
-    # Create or extract masks (example: different masks for outputs and targets)
-    # Note: output_mask will be applied to model outputs, which should have the same shape as inputs
-    output_masks = [torch.ones_like(item[0], dtype=torch.bool) for item in batch]
-    target_masks = [torch.ones_like(item[1], dtype=torch.bool) for item in batch]
-
-    # Stack inputs, targets, and masks into tensors
-    inputs = torch.stack(inputs)
-    targets = torch.stack(targets)
-    output_masks = torch.stack(output_masks)
-    target_masks = torch.stack(target_masks)
-
-    return inputs, targets, output_masks, target_masks
+from preqtorch import (
+    BlockEncoder,
+    EncoderState,
+    MIREncoder,
+    ModelClass,
+    PrequentialEncoder,
+    EncoderResult,
+    Replay,
+    ReplayBuffer,
+    ReplayStreams,
+    ReplayingDataLoader,
+    move_to_device,
+)
 ```
 
-### Encoding Function
+## Data, model, and loss contract
 
-By default encoders will attempt to use cross entropy loss, returning code lengths calculated from the loss in units of bits. However, a custom encoding function may be supplied. No matter what function is supplied, it will be called like this:
+PreqTorch treats each dataloader batch as opaque user data. A batch can be a tensor, tuple, list, dict, dataclass, or any object your model and loss function understand.
+
+PreqTorch preserves the source dataloader's collation behavior and does not provide a default loss function. Construct PyTorch dataloaders with the batching behavior you need, and pass a `loss_fn` to encoder calls.
+
+Models must accept the whole batch:
 
 ```python
-code_lengths = encoding_fn(outputs, target, output_mask, target_mask)
+output = model(batch)
 ```
 
-You can write the function however you wish! But understand that this is the call that will be made internally.
+Loss functions must accept the whole batch and the model output:
 
+```python
+code_lengths = loss_fn(batch, output)
+```
 
-## Encoders
+`loss_fn` should return a tensor of code lengths or losses that can be summed. The encoders call `code_lengths.sum()` for optimization and accumulation.
 
-The package supports two types of prequential encoders, themselves approximations of true prequential encoding (which is unwieldy).
+## ModelClass
 
-### Block Encoding
-
-Block encoding divides the dataset into blocks and trains the model on each block sequentially. See Blier, et al. (2018) for details.
+Encoders instantiate models through `ModelClass`. Pass a `torch.nn.Module` subclass, not an instance.
+By default, matrix parameters use Xavier initialization, parameters named `bias` are zeroed, and other parameters use a uniform distribution over `[-1, 1]`.
 
 ```python
 import torch
-from preqtorch import BlockEncoder
+from preqtorch import ModelClass
 
-# Define a model class
-class MyModel(torch.nn.Module):
-    def __init__(self):
+class Classifier(torch.nn.Module):
+    def __init__(self, input_size=10, output_size=2):
         super().__init__()
-        self.linear = torch.nn.Linear(10, 2)
+        self.linear = torch.nn.Linear(input_size, output_size)
 
-    def forward(self, x):
-        return self.linear(x)
+    def forward(self, batch):
+        inputs, targets = batch
+        return self.linear(inputs)
 
-# Create a block encoder
-encoder = BlockEncoder(
-    model_class=MyModel,
-    loss_fn=torch.nn.functional.cross_entropy
-)
-
-# Encode a dataset using block encoding
-model, code_length, history = encoder.encode(
-    dataset=my_dataset,
-    set_name="My Dataset",
-    stop_points=[0.125, 0.25, 0.5, 1.0],  # Points (in proportion) to stop and evaluate
-    batch_size=32,
-    seed=42,
-    learning_rate=0.001,
-    epochs=50,
-    patience=20,
-    collate_fn=my_collate_fn  # Your custom collate function
-)
+model_class = ModelClass(Classifier, device="cpu", kwargs={"input_size": 10, "output_size": 2})
 ```
 
-### MIR Encoding
+You can pass `init_func` to control initialization:
 
-MIR (Mini-batch Incremental/Replay) encoding uses replay buffers or streams to revisit previous data. See Bornschein, et al. (2022) for details.
+```python
+def init_model(model):
+    for parameter in model.parameters():
+        torch.nn.init.normal_(parameter, mean=0.0, std=0.02)
+    return model
+
+model_class = ModelClass(Classifier, device="cpu", init_func=init_model)
+```
+
+## Loss function example
+
+```python
+import torch.nn.functional as F
+
+def loss_fn(batch, output):
+    inputs, targets = batch
+    return F.cross_entropy(output, targets, reduction="none")
+```
+
+For structured batches, unpack the format you defined:
+
+```python
+def sequence_loss_fn(batch, output):
+    targets = batch["targets"]
+    output_mask = batch["output_mask"]
+    return F.cross_entropy(output[output_mask], targets[output_mask], reduction="none")
+```
+
+## Device handling
+
+By default, encoders recursively move tensors inside standard Python containers (`tuple`, `list`, and `dict`) to the encoder device before calling `model(batch)` and `loss_fn(batch, output)`. Non-tensor objects are left unchanged.
+
+Pass `use_device_handling=False` to `encode(...)` or `calculate_code_length(...)` if your own dataloader, model, or batch type handles device placement.
+
+## BlockEncoder
+
+`BlockEncoder.encode(...)` evaluates each block and accumulates its code length. After every non-final evaluation block, it restores the model's initial weights, creates a fresh optimizer, and trains on the training dataloader at the same index. That trained model is then used for the next evaluation block.
+
+```python
+from preqtorch import BlockEncoder
+
+encoder = BlockEncoder(model_class=model_class, device="cpu")
+
+result = encoder.encode(
+    train_dataloader=[train_loader_1, train_loader_2],
+    eval_dataloaders=[eval_loader_1, eval_loader_2],
+    set_name="example",
+    seed=42,
+    loss_fn=loss_fn,
+    learning_rate=1e-4,
+    epochs=50,
+    patience=20,
+)
+
+print(result.code_length)
+print(result.history)
+```
+
+`train_dataloader` and `eval_dataloaders` must have the same length. Because training happens between evaluation blocks, the final training dataloader is not consumed.
+
+## MIREncoder
+
+`MIREncoder.encode(...)` processes one batched, map-style PyTorch dataloader with replay. Iterable-style datasets are not supported because replay stores and rematerializes sample indices. The encoder preserves the source dataloader's batch sampler, including sampler order and `drop_last` behavior.
 
 ```python
 from preqtorch import MIREncoder
 
-# Create a MIR encoder
-encoder = MIREncoder(
-    model_class=MyModel,
-    loss_fn=torch.nn.functional.cross_entropy
+encoder = MIREncoder(model_class=model_class, device="cpu")
+
+result = encoder.encode(
+    dataloader=loader,
+    set_name="example",
+    n_replay_samples=2,
+    loss_fn=loss_fn,
+    learning_rate=1e-4,
+    seed=42,
+    alpha=0.1,
+    use_beta=False,
+    use_ema=True,
+    replay_type="buffer",  # "buffer" or "streams"
 )
 
-# Encode a dataset using MIR encoding
-model, code_length, history, ema_params, beta, replay = encoder.encode(
-    dataset=my_dataset,
-    set_name="My Dataset",
-    n_replay_samples=2,  # Number of replay streams or buffer size
-    learning_rate=0.001,
-    batch_size=32,
-    seed=42,
-    alpha=0.1,  # EMA update rate
-    collate_fn=my_collate_fn,  # Your custom collate function
-    use_beta=True,  # Whether to use learnable temperature parameter
-    use_ema=True,  # Whether to use exponential moving average
-    replay_type="buffer"  # Type of replay: "buffer" or "streams"
-)
+print(result.code_length)
+print(result.history)
+print(result.replay)
 ```
+
+Useful options:
+
+- `n_replay_samples`: required unless `replay` is supplied. For `replay_type="buffer"`, this is the number of replay batches sampled after each source batch. For `replay_type="streams"`, it is the number of replay streams.
+- `collate_fn`: overrides collation for both source and replay batches. If omitted, the source dataloader's `collate_fn` is reused.
+- `replay`: a preconstructed custom `Replay` instance. It must use the exact same dataset object as the source dataloader. When supplied, it owns replay updates and sampling, and `n_replay_samples` and `replay_type` are not used.
+- `shuffle`: retained for direct `initialize(...)` calls; `encode(...)` follows the source dataloader's sampler order.
+- `pin_memory`: overrides pinned-memory behavior; if omitted, the encoder or source dataloader setting is reused.
+- `use_device_handling=False`: disables automatic recursive tensor movement to the encoder device.
+- `use_beta=True`: scales tensor outputs by a learned positive scalar. Keep this disabled for non-tensor model outputs.
+- `use_ema=True`: evaluates each new source batch with an exponential moving average of the model parameters.
+
+The built-in `ReplayBuffer` requires a fixed batch size. `ReplayStreams`, or a custom `Replay`, can be used with a variable-size custom batch sampler.
+
+## Results
+
+Encoder runs return an `EncoderResult` dataclass:
+
+```python
+@dataclass
+class EncoderResult:
+    model: Any
+    code_length: float
+    history: list[float]
+    ema_params: Any | None = None
+    beta: Any | None = None
+    replay: Any | None = None
+```
+
+`BlockEncoder` fills `model`, `code_length`, and `history`.
+
+`MIREncoder` can also fill `ema_params`, `beta`, and `replay`, depending on the options used.
+
+## Replay utilities
+
+PreqTorch also exports replay helpers:
+
+- `Replay`: base class for custom replay policies. Implement `update(new_indices)` and `sample()`; `sample()` returns an iterable of `(indices, batch)` pairs.
+- `ReplayBuffer`: uniformly samples up to `batch_size` items from previously seen indices.
+- `ReplayStreams`: samples one batch from each replay stream, following previously seen source batches; it supports variable batch sizes.
+- `ReplayingDataLoader`: wraps a map-style dataset and replay object so the current stream and replay samples can be used together; it can be iterated repeatedly and its length is the number of source batches. Direct construction requires a positive integer `batch_size`; use `ReplayingDataLoader.from_dataloader(...)` to preserve an existing dataloader's batch sampler and worker settings.
+
+Replay implementations use PyTorch's default collation when `collate_fn` is omitted.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## See also
-
-Bornschein, J., Li, Y., & Hutter, M. (2022). Sequential learning of neural networks for prequential mdl. arXiv preprint arXiv:2210.07931.
-
-Blier, L., & Ollivier, Y. (2018). The description length of deep learning models. Advances in Neural Information Processing Systems, 31.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
