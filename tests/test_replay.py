@@ -170,6 +170,93 @@ def test_replaying_data_loader():
 
     print("ReplayingDataLoader test passed!")
 
+
+def test_replay_implementations_use_default_collation():
+    dataset = SimpleDataset(size=4)
+    replay_implementations = [
+        ReplayBuffer(dataset, batch_size=2, n_samples=1),
+        ReplayStreams(dataset, batch_size=2, n_streams=1),
+    ]
+
+    for replay in replay_implementations:
+        replay.update([0, 1])
+        sampled_batches = replay.sample()
+
+        assert len(sampled_batches) == 1
+        indices, (inputs, targets) = sampled_batches[0]
+        assert sorted(indices) == [0, 1]
+        assert sorted(inputs.tolist()) == [0, 1]
+        assert torch.equal(targets, inputs * 2)
+
+
+def test_replay_buffer_caps_batch_size_at_seen_population():
+    dataset = SimpleDataset(size=4)
+    replay = ReplayBuffer(dataset, batch_size=4, n_samples=1)
+    replay.update([2])
+
+    sampled_batches = replay.sample()
+
+    assert len(sampled_batches) == 1
+    indices, (inputs, targets) = sampled_batches[0]
+    assert indices == [2]
+    assert torch.equal(inputs, torch.tensor([2]))
+    assert torch.equal(targets, torch.tensor([4]))
+
+
+def test_replay_streams_returns_no_samples_before_first_update():
+    replay = ReplayStreams(SimpleDataset(size=4), batch_size=2, n_streams=1)
+
+    assert replay.sample() == []
+
+
+@pytest.mark.parametrize(
+    ("factory", "message"),
+    [
+        (lambda dataset: ReplayBuffer(dataset, batch_size=0, n_samples=1), "positive integer batch_size"),
+        (lambda dataset: ReplayBuffer(dataset, batch_size=2, n_samples=-1), "non-negative integer"),
+        (lambda dataset: ReplayStreams(dataset, batch_size=2, n_streams=-1), "non-negative integer"),
+    ],
+)
+def test_replay_implementations_reject_invalid_sizes(factory, message):
+    with pytest.raises(ValueError, match=message):
+        factory(SimpleDataset(size=4))
+
+
+def test_replaying_data_loader_rejects_replay_for_different_dataset():
+    dataset = SimpleDataset(size=4)
+    other_dataset = SimpleDataset(size=4)
+    replay = ReplayBuffer(other_dataset, batch_size=2, n_samples=1)
+
+    with pytest.raises(ValueError, match="must use the ReplayingDataLoader dataset"):
+        ReplayingDataLoader(dataset, batch_size=2, replay=replay)
+
+
+def test_replaying_data_loader_requires_batch_size_without_source_loader():
+    dataset = SimpleDataset(size=4)
+    replay = ReplayStreams(dataset, batch_size=None, n_streams=1)
+
+    with pytest.raises(ValueError, match="positive integer without a source dataloader"):
+        ReplayingDataLoader(dataset, batch_size=None, replay=replay)
+
+
+def test_replaying_data_loader_is_reiterable_and_reports_batch_count():
+    dataset = SimpleDataset(size=5)
+    replay = ReplayBuffer(dataset, batch_size=2, n_samples=0)
+    data_loader = ReplayingDataLoader(
+        dataset=dataset,
+        batch_size=2,
+        replay=replay,
+        shuffle=False,
+        warn_threshold=100,
+    )
+
+    first_pass = [inputs.tolist() for inputs, _ in data_loader]
+    second_pass = [inputs.tolist() for inputs, _ in data_loader]
+
+    assert len(data_loader) == 3
+    assert first_pass == [[0, 1], [2, 3], [4]]
+    assert second_pass == first_pass
+
 def main():
     print("Testing replay objects...")
     test_replay_streams()

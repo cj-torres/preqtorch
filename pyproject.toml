@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling", "torch>=1.0.0"]
+requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
 name = "preqtorch"
-version = "0.1.6"
+version = "0.2.0"
 authors = [
   { name="Charles Torres", email="torrescj92@gmail.com" },
 ]
@@ -17,9 +17,14 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "torch>=1.0.0",
-    "numpy>=1.19.0",
-    "tqdm>=4.0.0",
+    "torch>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.2",
+    "pytest>=8.0",
+    "twine>=7.0",
 ]
 
 [project.urls]

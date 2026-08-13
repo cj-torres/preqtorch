@@ -5,7 +5,7 @@ import torch
 from torch.func import functional_call
 
 from .batches import move_to_device
-from .replay import ReplayBuffer, ReplayStreams, ReplayingDataLoader
+from .replay import Replay, ReplayBuffer, ReplayStreams, ReplayingDataLoader
 from .results import EncoderResult
 from .utils import ModelClass
 
@@ -19,7 +19,7 @@ class EncoderState:
         self.ema_params = ema_params
         self.trained_params = trained_params
         self.loss_fn = loss_fn
-        self.code_length = 0
+        self.code_length = 0.0
         self.history = []
 
 
@@ -94,9 +94,7 @@ class BlockEncoder(PrequentialEncoder):
 
         model = self._sample_model_class()
         model.to(self.device)
-        optim = self._get_optimizer(model, learning_rate)
-
-        state = EncoderState(model=model, optim=optim, beta=None, beta_optim=None,
+        state = EncoderState(model=model, optim=None, beta=None, beta_optim=None,
                              ema_params=None, trained_params=None, loss_fn=loss_fn)
 
         if len(train_dataloader) != len(eval_dataloaders):
@@ -109,6 +107,7 @@ class BlockEncoder(PrequentialEncoder):
             if i == len(train_dataloader) - 1:
                 break
             state.model.load_state_dict(initial_weights)
+            state.optim = self._get_optimizer(state.model, learning_rate)
             self.train_until_patience(state, train_loader, patience, epochs, use_device_handling=use_device_handling)
 
         print(f"Performance for {set_name}: Prequential code length: {state.code_length}")
@@ -159,18 +158,18 @@ class BlockEncoder(PrequentialEncoder):
 
 
 class MIREncoder(PrequentialEncoder):
-    def encode(self, dataloader, set_name, n_replay_samples, loss_fn=None, learning_rate=1e-4,
+    def encode(self, dataloader, set_name, n_replay_samples=None, loss_fn=None, learning_rate=1e-4,
                seed=42, alpha=0.1, collate_fn=None, pin_memory=None, use_device_handling=True, use_beta=True,
-               use_ema=True, shuffle=True, replay_type="buffer"):
+               use_ema=True, shuffle=True, replay_type="buffer", replay=None):
         self._validate_loss_fn_contract(loss_fn)
         if pin_memory is None:
-            pin_memory = self.pin_memory
+            pin_memory = self.pin_memory or dataloader.pin_memory
         self.pin_memory = pin_memory
 
         dataset = dataloader.dataset
         batch_size = dataloader.batch_size
         if batch_size is None:
-            raise ValueError("Dataloader must define batch_size")
+            batch_size = getattr(dataloader.batch_sampler, "batch_size", None)
 
         if collate_fn is None:
             collate_fn = dataloader.collate_fn
@@ -178,7 +177,7 @@ class MIREncoder(PrequentialEncoder):
         state, replay_loader = self.initialize(
             dataset, batch_size, seed, n_replay_samples, replay_type,
             None, learning_rate, alpha, collate_fn, shuffle, use_beta, use_ema, loss_fn,
-            pin_memory=pin_memory)
+            pin_memory=pin_memory, source_dataloader=dataloader, replay=replay)
 
         for batch in replay_loader:
             self.step(batch, replay_loader, state, alpha, use_device_handling=use_device_handling)
@@ -186,9 +185,9 @@ class MIREncoder(PrequentialEncoder):
         model, code_length, history, ema_params, beta = self.finalize(state)
         return EncoderResult(model, code_length, history, ema_params=ema_params, beta=beta, replay=replay_loader.replay)
 
-    def initialize(self, dataset, batch_size, seed, n_replay_samples, replay_type="buffer",
+    def initialize(self, dataset, batch_size, seed, n_replay_samples=None, replay_type="buffer",
                    model=None, learning_rate=1e-4, alpha=0.1, collate_fn=None, shuffle=True, use_beta=True,
-                   use_ema=False, loss_fn=None, pin_memory=False):
+                   use_ema=False, loss_fn=None, pin_memory=False, source_dataloader=None, replay=None):
         self._validate_loss_fn_contract(loss_fn)
         torch.manual_seed(seed)
         random.seed(seed)
@@ -204,15 +203,39 @@ class MIREncoder(PrequentialEncoder):
             beta = None
             beta_optim = None
 
-        if replay_type == "streams":
+        if replay is not None:
+            if not isinstance(replay, Replay):
+                raise TypeError("replay must be an instance of Replay")
+            if replay.dataset is not dataset:
+                raise ValueError("replay must use the dataloader dataset")
+            replay_impl = replay
+        elif n_replay_samples is None:
+            raise ValueError("n_replay_samples is required when replay is not provided")
+        elif replay_type == "streams":
             replay_impl = ReplayStreams(dataset, batch_size=batch_size, n_streams=n_replay_samples, collate_fn=collate_fn)
         elif replay_type == "buffer":
             replay_impl = ReplayBuffer(dataset, batch_size=batch_size, n_samples=n_replay_samples, collate_fn=collate_fn)
         else:
             raise ValueError("replay_type must be 'streams' or 'buffer'")
 
-        replay_loader = ReplayingDataLoader(dataset, batch_size=batch_size, replay=replay_impl,
-                                            collate_fn=collate_fn, shuffle=shuffle, pin_memory=pin_memory)
+        if source_dataloader is None:
+            if batch_size is None:
+                raise ValueError("batch_size is required without a source dataloader")
+            replay_loader = ReplayingDataLoader(
+                dataset,
+                batch_size=batch_size,
+                replay=replay_impl,
+                collate_fn=collate_fn,
+                shuffle=shuffle,
+                pin_memory=pin_memory,
+            )
+        else:
+            replay_loader = ReplayingDataLoader.from_dataloader(
+                source_dataloader,
+                replay=replay_impl,
+                collate_fn=collate_fn,
+                pin_memory=pin_memory,
+            )
 
         if use_ema:
             ema_params = {name: param.clone().detach() for name, param in model.named_parameters()}
@@ -241,8 +264,9 @@ class MIREncoder(PrequentialEncoder):
 
         code_lengths, _, _ = self.calculate_code_length(state, batch, use_device_handling=use_device_handling)
         loss = code_lengths.sum()
-        state.code_length += loss.detach()
-        state.history.append(loss.detach())
+        value = loss.detach().item()
+        state.code_length += value
+        state.history.append(value)
         if use_beta:
             loss.backward()
             state.beta_optim.step()
@@ -251,6 +275,8 @@ class MIREncoder(PrequentialEncoder):
             state.optim.zero_grad()
             code_lengths, _, _ = self.calculate_code_length(state, batch, False, False, use_device_handling=use_device_handling)
             loss = code_lengths.sum()
+            loss.backward()
+        else:
             loss.backward()
         state.optim.step()
         state.optim.zero_grad()

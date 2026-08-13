@@ -13,23 +13,24 @@ For local development:
 ```bash
 git clone https://github.com/cj-torres/preqtorch.git
 cd preqtorch
-pip install -e .
+python -m pip install -e ".[dev]"
+python -m pytest
 ```
 
 ## Requirements
 
 - Python 3.11+
-- PyTorch with `torch.func` support (PyTorch 2.x recommended)
-- NumPy 1.19+
-- tqdm 4.0+
+- PyTorch 2.0+ (required for `torch.func`)
 
 ## Public API
 
 ```python
 from preqtorch import (
     BlockEncoder,
+    EncoderState,
     MIREncoder,
     ModelClass,
+    PrequentialEncoder,
     EncoderResult,
     Replay,
     ReplayBuffer,
@@ -43,7 +44,7 @@ from preqtorch import (
 
 PreqTorch treats each dataloader batch as opaque user data. A batch can be a tensor, tuple, list, dict, dataclass, or any object your model and loss function understand.
 
-PreqTorch does not provide a default collate function or a default loss function. Construct PyTorch dataloaders with the batching behavior you need, and pass a `loss_fn` to encoder calls.
+PreqTorch preserves the source dataloader's collation behavior and does not provide a default loss function. Construct PyTorch dataloaders with the batching behavior you need, and pass a `loss_fn` to encoder calls.
 
 Models must accept the whole batch:
 
@@ -62,6 +63,7 @@ code_lengths = loss_fn(batch, output)
 ## ModelClass
 
 Encoders instantiate models through `ModelClass`. Pass a `torch.nn.Module` subclass, not an instance.
+By default, matrix parameters use Xavier initialization, parameters named `bias` are zeroed, and other parameters use a uniform distribution over `[-1, 1]`.
 
 ```python
 import torch
@@ -117,7 +119,7 @@ Pass `use_device_handling=False` to `encode(...)` or `calculate_code_length(...)
 
 ## BlockEncoder
 
-`BlockEncoder.encode(...)` evaluates each evaluation dataloader, trains on the matching training dataloader, and accumulates code length.
+`BlockEncoder.encode(...)` evaluates each block and accumulates its code length. After every non-final evaluation block, it restores the model's initial weights, creates a fresh optimizer, and trains on the training dataloader at the same index. That trained model is then used for the next evaluation block.
 
 ```python
 from preqtorch import BlockEncoder
@@ -139,11 +141,11 @@ print(result.code_length)
 print(result.history)
 ```
 
-`train_dataloader` and `eval_dataloaders` must have the same length.
+`train_dataloader` and `eval_dataloaders` must have the same length. Because training happens between evaluation blocks, the final training dataloader is not consumed.
 
 ## MIREncoder
 
-`MIREncoder.encode(...)` processes a single dataloader with replay. The dataloader must expose `dataset` and `batch_size`.
+`MIREncoder.encode(...)` processes one batched, map-style PyTorch dataloader with replay. Iterable-style datasets are not supported because replay stores and rematerializes sample indices. The encoder preserves the source dataloader's batch sampler, including sampler order and `drop_last` behavior.
 
 ```python
 from preqtorch import MIREncoder
@@ -170,11 +172,16 @@ print(result.replay)
 
 Useful options:
 
-- `collate_fn`: used when replay batches are materialized from sampled dataset indices. If omitted, the source dataloader's `collate_fn` is reused.
-- `shuffle`: controls the internal replaying dataloader order.
-- `pin_memory`: passes pinned-memory behavior into internal dataloading and batch movement.
+- `n_replay_samples`: required unless `replay` is supplied. For `replay_type="buffer"`, this is the number of replay batches sampled after each source batch. For `replay_type="streams"`, it is the number of replay streams.
+- `collate_fn`: overrides collation for both source and replay batches. If omitted, the source dataloader's `collate_fn` is reused.
+- `replay`: a preconstructed custom `Replay` instance. It must use the exact same dataset object as the source dataloader. When supplied, it owns replay updates and sampling, and `n_replay_samples` and `replay_type` are not used.
+- `shuffle`: retained for direct `initialize(...)` calls; `encode(...)` follows the source dataloader's sampler order.
+- `pin_memory`: overrides pinned-memory behavior; if omitted, the encoder or source dataloader setting is reused.
 - `use_device_handling=False`: disables automatic recursive tensor movement to the encoder device.
 - `use_beta=True`: scales tensor outputs by a learned positive scalar. Keep this disabled for non-tensor model outputs.
+- `use_ema=True`: evaluates each new source batch with an exponential moving average of the model parameters.
+
+The built-in `ReplayBuffer` requires a fixed batch size. `ReplayStreams`, or a custom `Replay`, can be used with a variable-size custom batch sampler.
 
 ## Results
 
@@ -199,9 +206,12 @@ class EncoderResult:
 
 PreqTorch also exports replay helpers:
 
-- `ReplayBuffer`: uniformly samples batches from previously seen indices.
-- `ReplayStreams`: samples replay streams from previously seen batches.
-- `ReplayingDataLoader`: wraps a dataset and replay object so the current stream and replay samples can be used together.
+- `Replay`: base class for custom replay policies. Implement `update(new_indices)` and `sample()`; `sample()` returns an iterable of `(indices, batch)` pairs.
+- `ReplayBuffer`: uniformly samples up to `batch_size` items from previously seen indices.
+- `ReplayStreams`: samples one batch from each replay stream, following previously seen source batches; it supports variable batch sizes.
+- `ReplayingDataLoader`: wraps a map-style dataset and replay object so the current stream and replay samples can be used together; it can be iterated repeatedly and its length is the number of source batches. Direct construction requires a positive integer `batch_size`; use `ReplayingDataLoader.from_dataloader(...)` to preserve an existing dataloader's batch sampler and worker settings.
+
+Replay implementations use PyTorch's default collation when `collate_fn` is omitted.
 
 ## License
 
